@@ -1,0 +1,28 @@
+# Copy to /etc/mica/config.toml.
+# Empty S3 fields are read from the environment:
+# S3_ENDPOINT, BUCKET_NAME, ACCESS_KEY_ID, SECRET_ACCESS_KEY, S3_REGION, S3_PREFIX.
+
+socket = "/run/mica.sock"
+data_dir = "/var/lib/mica"
+# Clean chunk cache, shared by all disks on this node.
+cache_limit_gib = 50
+# Local data not yet in S3, for each attached disk.
+dirty_limit_gib = 20
+checkpoint_interval_secs = 180
+# `mica disk mount` only mounts below these folders.
+mount_roots = ["/mnt", "/srv", "/media"]
+# `mica gc` keeps this many checkpoints of each disk as restore points.
+gc_keep_checkpoints = 5
+# `mica gc` never deletes objects written in the last hours.
+gc_grace_hours = 24
+# MemoryHigh= for mica.service, such as "2G". Empty means no limit: the
+# kernel frees mica's page cache anyway when other programs need memory.
+memory_high = ""
+
+[s3]
+endpoint = ""
+bucket = ""
+access_key_id = ""
+secret_access_key = ""
+region = "auto"
+prefix = ""
