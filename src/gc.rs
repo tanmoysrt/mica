@@ -16,7 +16,7 @@ const SAFE_GRACE: Duration = Duration::from_secs(3600);
 const STALE_LOCK: Duration = Duration::from_secs(6 * 3600);
 
 /// Deletes chunks and manifests that no disk, snapshot or kept checkpoint
-/// needs. See "Garbage collection" in plan.md.
+/// needs. See "Garbage collection" in docs/design.md.
 pub struct GarbageCollector<'a> {
     pub bucket: &'a Bucket,
     pub node_name: &'a str,

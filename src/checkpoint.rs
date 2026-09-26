@@ -17,7 +17,7 @@ const UPLOAD_PARALLELISM: usize = 16;
 type Uploaded = Vec<(usize, Option<ContentHash>)>;
 
 impl Disk {
-    /// Uploads the dirty chunks and commits a new manifest. See "Checkpoint" in plan.md.
+    /// Uploads the dirty chunks and commits a new manifest. See "Checkpoint" in docs/design.md.
     pub async fn checkpoint(&self) -> Result<()> {
         let _running = self.checkpoint_running.lock().await;
         self.ensure_usable()?;

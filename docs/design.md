@@ -1,4 +1,6 @@
-# mica: plan v1
+# Design
+
+This is the full design of mica: formats, rules and the reasons for them. For an overview with diagrams, read [architecture.md](architecture.md) first. For failures, see [reliability.md](reliability.md).
 
 mica makes a VM disk that lives in S3.
 
@@ -8,7 +10,7 @@ The node reads data from S3 only when the disk needs it. The node writes changes
 
 ## 1. Use cases
 
-**Liquid VMs.** A VM starts on any node. The controller stops the VM when it is inactive. Later, the VM starts again on a different node. The disk moves with the VM, but the node does not copy the full disk.
+**Sandboxes.** A sandbox (a VM or a container) starts on any node. The controller stops it when it is inactive. Later, it starts again on a different node. The disk moves with the sandbox, but the node does not copy the full disk.
 
 **Labs.** A VM starts from an image and must boot fast. The user then installs many packages, which writes many small files. The user leaves, and the controller stops the VM.
 
@@ -373,7 +375,7 @@ A cold boot reads many chunks from all over the disk. One GET at a time, this ta
 2. Each checkpoint writes the list into `head`. The list is a few KB. At detach, mica writes `head` also when only the profile changed.
 3. At attach, mica GETs the chunks in the profile, 32 at a time, in the recorded order. Reads from the guest go first.
 
-For labs, the image profile comes from its first boot, so every later boot is fast. For liquid VMs, the profile comes from the last session, so the working set of the user is ready first.
+For labs, the image profile comes from its first boot, so every later boot is fast. For sandboxes, the profile comes from the last session, so the working set of the user is ready first.
 
 The chunk cache is shared by all disks on a node. When many VMs on a node use the same image, only the first boot gets the chunks from S3.
 
@@ -393,7 +395,7 @@ The snapshot is crash-consistent. For a clean filesystem snapshot, the controlle
 
 **Image.** Make a disk, install the OS, boot it once, detach it and take a snapshot. Clone the snapshot for each VM.
 
-## 15a. Garbage collection
+## 16. Garbage collection
 
 Checkpoints leave old chunk versions in S3. Deleted disks and snapshots leave chunks and manifests too. `mica gc` deletes them. Someone runs it by hand, or a controller runs `mica gc -y`.
 
@@ -415,7 +417,7 @@ If GC cannot read a head, a snapshot or a kept manifest, it stops and deletes no
 
 `mica gc` counts the garbage first and asks before it deletes. `-y` deletes without the question.
 
-## 16. Local space
+## 17. Local space
 
 **Cache.** The cache has a size limit. When full, mica deletes the least recently used chunks. It can delete any cache chunk, because S3 has all of them.
 
@@ -423,7 +425,7 @@ If GC cannot read a head, a snapshot or a kept manifest, it stops and deletes no
 
 **Dirty space.** Dirty space also has a limit. At the high-water mark, a checkpoint starts. At the limit, new writes wait until a checkpoint frees space. The guest sees a slow disk, not an I/O error.
 
-## 17. Defaults
+## 18. Defaults
 
 | Setting | Default |
 |---|---|
@@ -440,9 +442,9 @@ After the first tests, review the chunk size. Measure two things:
 - The boot time with a real image. Smaller chunks make cold boots faster.
 - The upload size after a large package install. A small write uploads the full chunk, so smaller chunks upload less.
 
-## 18. Code layout
+## 19. Code layout
 
-See `src/code-map.md` for each file, the order to read them, and the main flows.
+See [src/code-map.md](../src/code-map.md) for each file, the order to read them, and the main flows.
 
 ### Daemon
 
@@ -484,7 +486,7 @@ A member must not become root through mica:
 
 `mica.service` is `Type=notify`: `systemctl start` returns when mica answers. The daemon raises its open-file limit, because it keeps one open file per dirty chunk.
 
-The engine (`Disk` in `src/disk.rs`) has four calls: `read`, `write`, `discard` and `flush`. The S3 wrapper (`Bucket` in `src/bucket.rs`) has four calls: `get`, `put`, `delete` and `exists`.
+The engine (`Disk` in `src/disk.rs`) has five calls: `read`, `write`, `discard`, `write_zeroes` and `flush`. The S3 wrapper (`Bucket` in `src/bucket.rs`) has `get`, `put`, `delete` and `exists`, plus listings and ranged reads for `ls` and GC. It counts every request.
 
 ### Crates
 
@@ -492,62 +494,14 @@ The engine (`Disk` in `src/disk.rs`) has four calls: `read`, `write`, `discard` 
 - `tokio` for the engine and S3 calls.
 - `object_store` for S3 with a custom endpoint.
 - `smol` for the executor that `libublk` drives on each queue thread.
-- `sha2`, `bytes`, `serde_json`, `toml`, `clap`.
+- `io-uring`, for the control ring that `libublk` needs on each thread.
+- `dialoguer`, for the setup prompts.
+- `sha2`, `bytes`, `serde_json`, `toml`, `clap`, `humantime`.
 
 `libublk` runs its own io_uring loop on each queue thread. Each request is spawned on the tokio runtime, and the queue thread waits on its join handle.
 
 The daemon runs in its own mount namespace. The libublk README requires this: a mount of the device inside the namespace of the daemon can deadlock when the daemon exits.
 
-## 19. Build order
-
-1. **Engine on a memory store.** Manifest, chunk map, read, write, discard, zero chunks. Test unaligned reads and writes.
-2. **Dirty files.** FLUSH and recovery from the local SSD.
-3. **Checkpoint.** Freeze, upload and commit, on a local folder store.
-4. **Attach, detach, snapshot, clone and resize.** With the `attached` marker and node restart.
-5. **Chunk cache.** With eviction.
-6. **S3 store.** Test on Garage in a container first, then on R2 and Ceph.
-7. **ublk frontend.**
-8. **Read profile and prefetch.**
-9. **Kill tests.** Kill mica during a write, a FLUSH and each checkpoint step. Check that no flushed data is lost.
-10. **`mica disk mount` and `mica disk unmount`.**
-11. **Move a disk between two nodes.**
-
-## 20. Done when
-
-```bash
-# Node A
-mica disk create disk-123 --size 20G
-mica disk attach disk-123
-mkfs.ext4 /dev/mica/disk-123
-mount /dev/mica/disk-123 /mnt
-cp -a /some/rootfs/* /mnt/
-sync
-umount /mnt
-mica disk detach disk-123
-
-# Node B, with an empty cache
-mica disk attach disk-123
-mount /dev/mica/disk-123 /mnt
-sha256sum /mnt/some/file
-umount /mnt
-
-# Node B, as a container volume
-mica disk mount disk-123 /srv/volumes/disk-123
-docker run --rm -v /srv/volumes/disk-123:/data alpine sha256sum /data/some/file
-mica disk unmount disk-123
-```
-
-Then:
-
-```bash
-mica snapshot create disk-123 base
-mica disk create disk-456 --from-snapshot base
-```
-
-The clone must use almost no new space in S3 until the guest writes to it.
-
-A VM that boots from a clone of an image with a profile must boot in a few seconds.
-
-## 21. Not in v1
+## 20. Not built yet
 
 - A Docker volume plugin or a Kubernetes CSI driver. For v1, use `mica disk mount` on the host and bind-mount the path.

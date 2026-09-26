@@ -1,6 +1,6 @@
 # Code map
 
-This page tells you where each part of mica is. Read `plan.md` first. It explains the design. This page explains the code.
+This page tells you where each part of mica is. Read [docs/architecture.md](../docs/architecture.md) first. It explains how mica works. This page explains the code.
 
 ## Read in this order
 

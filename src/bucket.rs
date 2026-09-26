@@ -208,7 +208,7 @@ fn age_secs(unix_time: i64) -> u64 {
     (crate::manifest::unix_now() as i64 - unix_time).max(0) as u64
 }
 
-/// Object keys. See "S3 layout" in plan.md.
+/// Object keys. See "S3 layout" in docs/design.md.
 pub mod keys {
     use super::ContentHash;
 
