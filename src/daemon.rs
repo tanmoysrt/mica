@@ -210,7 +210,8 @@ impl Daemon {
         loop {
             match disk.checkpoint().await {
                 Ok(()) => break,
-                Err(error) if disk.status().ownership_lost => {
+                // The local data is kept for an operator in both cases.
+                Err(error) if disk.status().ownership_lost || disk.status().sync_failed => {
                     folder.set_status(LocalStatus::Orphaned)?;
                     self.disks.lock().await.remove(&disk.id);
                     return Err(error);
@@ -250,6 +251,8 @@ impl Daemon {
             bucket: self.bucket.clone(),
             node: self.node.clone(),
             dirty_limit_bytes: self.config.dirty_limit_bytes(),
+            max_unsaved_age: Duration::from_secs(self.config.max_unsaved_minutes * 60),
+            wait_when_behind: self.config.wait_when_behind,
         })
     }
 
@@ -264,6 +267,7 @@ impl Daemon {
         folder.set_ublk_id(Some(device.id))?;
         let link = link_device(&folder.disk_id, &device.path)?;
         tokio::spawn(run_checkpoints(disk.clone(), self.checkpoint_interval()));
+        tokio::spawn(ownership::watch(disk.clone()));
         let attached = AttachedDisk { disk, device: Some(device), link };
         let result = attached.describe();
         disks.insert(folder.disk_id.clone(), attached);
@@ -301,13 +305,13 @@ async fn run_checkpoints(disk: Arc<Disk>, interval: Duration) {
         }
         if let Err(error) = disk.checkpoint().await {
             log::warn!("disk {}: checkpoint failed: {error:#}", disk.id);
-            if disk.status().ownership_lost {
+            if disk.status().ownership_lost || disk.status().sync_failed {
                 return;
             }
             tokio::time::sleep(RETRY_DELAY).await;
         }
         if disk.status().behind {
-            log::warn!("disk {}: behind, local data is older than 5 minutes", disk.id);
+            log::warn!("disk {}: behind, unsaved data is older than the limit", disk.id);
         }
     }
 }

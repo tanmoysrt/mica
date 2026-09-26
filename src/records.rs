@@ -21,6 +21,10 @@ pub struct AttachedMarker {
     pub node: String,
     pub node_id: String,
     pub since: String,
+    /// Random per attach. Two nodes that claim at the same moment both write
+    /// a marker; the one that reads back another claim ID backs off.
+    #[serde(default)]
+    pub claim_id: String,
 }
 
 /// `snapshots/<name>`: a named manifest.
@@ -55,7 +59,8 @@ impl Head {
 
 impl AttachedMarker {
     pub fn for_node(node: &NodeIdentity) -> Self {
-        Self { node: node.hostname.clone(), node_id: node.id.clone(), since: now_text() }
+        let claim_id = std::fs::read_to_string("/proc/sys/kernel/random/uuid").unwrap_or_default().trim().to_string();
+        Self { node: node.hostname.clone(), node_id: node.id.clone(), since: now_text(), claim_id }
     }
 
     pub async fn load(bucket: &Bucket, disk_id: &str) -> Result<Option<Self>> {

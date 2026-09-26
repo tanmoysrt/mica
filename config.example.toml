@@ -9,6 +9,10 @@ cache_limit_gib = 50
 # Local data not yet in S3, for each attached disk.
 dirty_limit_gib = 20
 checkpoint_interval_secs = 180
+# A disk is "behind" when data not in S3 is older than this.
+max_unsaved_minutes = 5
+# When behind, guest writes wait until uploads catch up.
+wait_when_behind = false
 # `mica disk mount` only mounts below these folders.
 mount_roots = ["/mnt", "/srv", "/media"]
 # `mica gc` keeps this many checkpoints of each disk as restore points.

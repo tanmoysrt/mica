@@ -53,7 +53,7 @@ Then read the helper files in the table below when you need them.
 | `records.rs` | JSON records: `Head`, `AttachedMarker`, `Snapshot`. |
 | `catalog.rs` | Operations that only touch S3: create, clone, snapshot, resize, delete, list, load a disk. |
 | `gc.rs` | `GarbageCollector`: finds the live manifests and chunks, and deletes old objects that are not live. |
-| `ownership.rs` | The `attached` marker: find the owner, claim, release. |
+| `ownership.rs` | The `attached` marker: find the owner, claim with a read-back, release, and the watcher that checks it every minute. |
 | `content_hash.rs` | `ContentHash` (SHA-256), hex and `sha256:` forms, zero check. |
 
 ### Node and host

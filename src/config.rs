@@ -14,6 +14,11 @@ pub struct Config {
     pub cache_limit_gib: u64,
     pub dirty_limit_gib: u64,
     pub checkpoint_interval_secs: u64,
+    /// A disk is "behind" when data that is not in S3 is older than this.
+    pub max_unsaved_minutes: u64,
+    /// When behind, guest writes wait until uploads catch up. That makes
+    /// the data-loss bound hold on a slow link, at the cost of slow writes.
+    pub wait_when_behind: bool,
     /// `mica disk mount` only mounts below these folders.
     pub mount_roots: Vec<PathBuf>,
     /// GC keeps this many checkpoints of each disk as restore points.
@@ -47,6 +52,8 @@ impl Default for Config {
             cache_limit_gib: 50,
             dirty_limit_gib: 20,
             checkpoint_interval_secs: 180,
+            max_unsaved_minutes: 5,
+            wait_when_behind: false,
             mount_roots: ["/mnt", "/srv", "/media"].into_iter().map(PathBuf::from).collect(),
             gc_keep_checkpoints: 5,
             gc_grace_hours: 24,

@@ -9,15 +9,18 @@ How to install mica on a node, configure it, and run it day to day.
 - An S3-compatible bucket: Cloudflare R2, Ceph RGW or Garage. mica does not need conditional writes.
 - A local SSD for `/var/lib/mica`. XFS or btrfs is best: their reflink copies make chunk copies free.
 - `mkfs.ext4` or `mkfs.xfs`, and `fstrim`, for `mica disk mount`.
+- To build: Rust, and libclang (`clang-devel` on Fedora, `libclang-dev` on Debian and Ubuntu).
 
 ## Setup
 
-Build mica, then run setup as root:
+Install mica from GitHub, then run setup as root:
 
 ```bash
-cargo build --release
-sudo ./target/release/mica service setup
+cargo install --git https://github.com/tanmoysrt/mica
+sudo ~/.cargo/bin/mica service setup
 ```
+
+`sudo` does not search `~/.cargo/bin`, so give the full path. Setup copies the binary to `/usr/local/bin/mica`; after that, `mica` works everywhere.
 
 Setup asks for the S3 settings. Each prompt shows the current value; Enter keeps it. The secret key is never shown. Then setup:
 
@@ -38,7 +41,12 @@ sudo mica service setup --use-config-file
 
 It fails with a list of every missing field. Setup reads only the file, never the shell environment, because a systemd service does not get that environment.
 
-**To upgrade**, build the new version and run setup again. Attached disks keep working through the restart.
+**To upgrade**, install the new version and run setup again. Attached disks keep working through the restart:
+
+```bash
+cargo install --git https://github.com/tanmoysrt/mica --force
+sudo ~/.cargo/bin/mica service setup --use-config-file
+```
 
 ## Configuration
 
@@ -50,6 +58,8 @@ data_dir = "/var/lib/mica"
 cache_limit_gib = 50
 dirty_limit_gib = 20
 checkpoint_interval_secs = 180
+max_unsaved_minutes = 5
+wait_when_behind = false
 mount_roots = ["/mnt", "/srv", "/media"]
 gc_keep_checkpoints = 5
 gc_grace_hours = 24
@@ -70,7 +80,9 @@ prefix = ""
 | `data_dir` | `/var/lib/mica` | Local chunks, cache and state. Cache and dirty chunks must be on one filesystem. |
 | `cache_limit_gib` | 50 | Clean chunk cache, shared by all disks of the node |
 | `dirty_limit_gib` | 20 | Local data not yet in S3, **for each attached disk**. At half, a checkpoint starts early; at the limit, writes wait. |
-| `checkpoint_interval_secs` | 180 | Time between checkpoints of a busy disk. Keep it well below 5 minutes. |
+| `checkpoint_interval_secs` | 180 | Time between checkpoints of a busy disk. Keep it well below `max_unsaved_minutes`. |
+| `max_unsaved_minutes` | 5 | A disk is **behind** when data not in S3 is older than this |
+| `wait_when_behind` | false | When behind, guest writes wait until uploads catch up. The data-loss bound then always holds; on a slow link, writes are slow. |
 | `mount_roots` | `/mnt`, `/srv`, `/media` | `mica disk mount` only mounts below these folders |
 | `gc_keep_checkpoints` | 5 | Checkpoints of each disk that GC keeps as restore points |
 | `gc_grace_hours` | 24 | GC never deletes objects written in this time |
@@ -201,6 +213,8 @@ Storage is the main cost. Disks made from one snapshot share its chunks, so an i
 | `/dev/ublkbN is in use` | Unmount it, or stop the VM or container first. |
 | `upload is behind` in `mica status` | Uploads are slower than writes, or S3 is unreachable. Check the network and `mica service logs`. |
 | `taken by another node` | Another node took the disk. The local data is kept as orphaned in `/var/lib/mica/disks/<disk>`. |
+| `stopped: local sync failed` | The local SSD failed a sync. The disk is stopped and its local data kept. Check the SSD (`dmesg`). S3 has the last commit. |
+| `was attached on X at the same moment` | Two nodes attached the disk at once, and the other won. Check your controller. |
 | `mount paths must be inside …` | Mount below `mount_roots`, or add the folder to `mount_roots`. |
 | `cannot stop: disks are attached here` | Unmount or detach the disks, or use `--force` and accept that their devices pause. |
 

@@ -17,7 +17,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 
-pub const MAX_UNSAVED_AGE: Duration = Duration::from_secs(5 * 60);
 
 /// One attached disk. It turns block reads and writes into chunk operations.
 /// It knows nothing about ublk.
@@ -40,6 +39,11 @@ pub struct Disk {
     pub(crate) checkpoint_wanted: Notify,
     pub(crate) checkpoint_running: tokio::sync::Mutex<()>,
     pub(crate) ownership_lost: AtomicBool,
+    /// Set when a local sync fails. Linux may have dropped the unsynced pages,
+    /// so a later sync that succeeds proves nothing. The disk stops for good.
+    pub(crate) sync_failed: AtomicBool,
+    max_unsaved_age: Duration,
+    wait_when_behind: bool,
     closed: AtomicBool,
     pub(crate) oldest_unsaved_write: Mutex<Option<Instant>>,
 }
@@ -68,6 +72,8 @@ pub struct DiskParts {
     pub bucket: Arc<Bucket>,
     pub node: Arc<NodeIdentity>,
     pub dirty_limit_bytes: u64,
+    pub max_unsaved_age: Duration,
+    pub wait_when_behind: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -78,6 +84,7 @@ pub struct DiskStatus {
     pub unsaved_bytes: u64,
     pub behind: bool,
     pub ownership_lost: bool,
+    pub sync_failed: bool,
 }
 
 struct ChunkPart {
@@ -124,6 +131,9 @@ impl Disk {
             checkpoint_wanted: Notify::new(),
             checkpoint_running: tokio::sync::Mutex::new(()),
             ownership_lost: AtomicBool::new(false),
+            sync_failed: AtomicBool::new(false),
+            max_unsaved_age: parts.max_unsaved_age,
+            wait_when_behind: parts.wait_when_behind,
             closed: AtomicBool::new(false),
             oldest_unsaved_write: Mutex::new((!recovered.is_empty()).then(Instant::now)),
         })
@@ -150,7 +160,7 @@ impl Disk {
 
     pub async fn write(&self, offset: u64, data: Vec<u8>) -> Result<()> {
         self.ensure_usable()?;
-        self.wait_for_local_space().await;
+        self.wait_for_room().await;
         let data = Arc::new(data);
         for part in self.split(offset, data.len())? {
             self.write_part(part, data.clone()).await?;
@@ -167,7 +177,7 @@ impl Disk {
         self.ensure_usable()?;
         for part in self.split(offset, len as usize)? {
             if part.buffer.len() as u64 == self.chunk_size {
-                self.wait_for_local_space().await;
+                self.wait_for_room().await;
                 self.zero_whole_chunk(part.index).await?;
                 self.note_unsaved_write();
             }
@@ -178,7 +188,7 @@ impl Disk {
     /// Unlike a discard, write-zeroes must zero every byte.
     pub async fn write_zeroes(&self, offset: u64, len: u64) -> Result<()> {
         self.ensure_usable()?;
-        self.wait_for_local_space().await;
+        self.wait_for_room().await;
         for part in self.split(offset, len as usize)? {
             if part.buffer.len() as u64 == self.chunk_size {
                 self.zero_whole_chunk(part.index).await?;
@@ -195,7 +205,9 @@ impl Disk {
     /// Makes all written data durable on the local SSD. It never touches S3.
     pub async fn flush(&self) -> Result<()> {
         self.ensure_usable()?;
+        // Writes during the sync add their chunk to the list again.
         let indexes = std::mem::take(&mut *self.unsynced.lock().unwrap());
+        let synced = indexes.clone();
         let mut files = Vec::new();
         for index in indexes {
             if let Some(file) = self.slots[index].lock().await.working.clone() {
@@ -204,7 +216,7 @@ impl Disk {
         }
         let folder_changed = self.folder_changed.swap(false, Ordering::SeqCst);
         let folder = self.folder.clone();
-        blocking(move || {
+        let result = blocking(move || {
             for file in files {
                 file.sync_data()?;
             }
@@ -213,7 +225,17 @@ impl Disk {
             }
             Ok(())
         })
-        .await
+        .await;
+        if let Err(error) = &result {
+            // Keep them marked, and stop the disk: a retry could succeed
+            // after Linux already dropped the data.
+            self.unsynced.lock().unwrap().extend(synced);
+            if folder_changed {
+                self.folder_changed.store(true, Ordering::SeqCst);
+            }
+            self.fail_sync(error);
+        }
+        result
     }
 
     /// Gets a chunk into the cache before the guest asks for it.
@@ -233,11 +255,7 @@ impl Disk {
     }
 
     pub fn status(&self) -> DiskStatus {
-        let behind = self
-            .oldest_unsaved_write
-            .lock()
-            .unwrap()
-            .is_some_and(|since| since.elapsed() > MAX_UNSAVED_AGE);
+        let behind = self.is_behind();
         DiskStatus {
             size: self.size,
             seq: self.committed.lock().unwrap().manifest.seq,
@@ -245,6 +263,7 @@ impl Disk {
             unsaved_bytes: self.local_chunks.load(Ordering::SeqCst) as u64 * self.chunk_size,
             behind,
             ownership_lost: self.ownership_lost.load(Ordering::SeqCst),
+            sync_failed: self.sync_failed.load(Ordering::SeqCst),
         }
     }
 
@@ -278,7 +297,22 @@ impl Disk {
         if self.ownership_lost.load(Ordering::SeqCst) {
             bail!("disk {} is owned by another node now", self.id);
         }
+        if self.sync_failed.load(Ordering::SeqCst) {
+            bail!("disk {} stopped after a failed local sync; its local data is kept", self.id);
+        }
         Ok(())
+    }
+
+    /// Stops the disk for good after a failed sync. See `sync_failed`.
+    pub(crate) fn fail_sync(&self, error: &anyhow::Error) {
+        self.sync_failed.store(true, Ordering::SeqCst);
+        log::error!("disk {}: local sync failed, the disk is stopped: {error:#}", self.id);
+    }
+
+    /// True when the oldest write that is not in S3 is older than the limit.
+    pub fn is_behind(&self) -> bool {
+        let limit = self.max_unsaved_age;
+        self.oldest_unsaved_write.lock().unwrap().is_some_and(|since| since.elapsed() > limit)
     }
 
     async fn readable_file(&self, index: usize) -> Result<Option<Arc<File>>> {
@@ -348,12 +382,16 @@ impl Disk {
         }
     }
 
-    /// At the dirty limit, writes wait for a checkpoint to free space.
-    /// The guest sees a slow disk, not an I/O error.
-    async fn wait_for_local_space(&self) {
+    /// Writes wait for a checkpoint at the dirty limit, and, with
+    /// `wait_when_behind`, while unsaved data is older than the limit. That
+    /// makes the data-loss bound hold on a slow link. The guest sees a slow
+    /// disk, not an I/O error.
+    async fn wait_for_room(&self) {
         loop {
             let freed = self.space_freed.notified();
-            if self.local_chunks.load(Ordering::SeqCst) < self.local_chunk_limit {
+            let full = self.local_chunks.load(Ordering::SeqCst) >= self.local_chunk_limit;
+            let too_old = self.wait_when_behind && self.is_behind();
+            if !full && !too_old {
                 return;
             }
             self.checkpoint_wanted.notify_one();

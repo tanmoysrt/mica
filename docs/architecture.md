@@ -187,6 +187,8 @@ sequenceDiagram
     E->>S: GET disks/disk-1/attached
     alt the marker is ours
         E->>S: PUT disks/disk-1/head (seq + 1)
+        E->>S: HEAD every committed chunk
+        Note over E,S: A chunk that GC deleted meanwhile<br/>is uploaded again from its frozen file
         E->>L: Move frozen files into the cache,<br/>or delete them if a newer .chunk exists
     else another node took the disk
         E-->>G: Stop: fail all I/O, keep the local data
@@ -210,11 +212,11 @@ stateDiagram-v2
 
 **Attach**
 
-1. Claim the `attached` marker. If another node holds it, stop. `--force` takes it, and is only for a node that is down.
+1. Claim the `attached` marker: write it with a random claim ID, wait 1 s, read it back. If another node holds it, or claimed at the same moment, stop. `--force` takes it, and is only for a node that is down.
 2. Read the head, then the manifest.
 3. Add any local chunks left by a crash.
 4. Make the ublk device and the link `/dev/mica/<disk>`.
-5. Start the checkpoint loop and the prefetch.
+5. Start the checkpoint loop, the prefetch, and a watcher that reads the marker every minute.
 
 **Detach** always waits. When it returns, S3 has all the data and the disk is free.
 

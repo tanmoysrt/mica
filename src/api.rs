@@ -12,6 +12,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
 pub const GROUP: &str = "mica";
+const RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// One JSON line per request and per response, on the Unix socket.
 #[derive(Debug, Serialize, Deserialize)]
@@ -76,7 +77,7 @@ pub async fn serve(daemon: Arc<Daemon>) -> Result<()> {
 
 /// Client side, used by the CLI.
 pub async fn send(socket: &Path, request: &Request) -> Result<Value> {
-    let stream = match UnixStream::connect(socket).await {
+    let stream = match connect(socket).await {
         Ok(stream) => stream,
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => bail!(
             "no permission to use mica.\n\n\
@@ -94,6 +95,20 @@ pub async fn send(socket: &Path, request: &Request) -> Result<Value> {
     match response.ok {
         true => Ok(response.result),
         false => bail!("{}", response.error.unwrap_or_default()),
+    }
+}
+
+/// During a restart the daemon is away for a few seconds. Wait for it,
+/// so that the CLI and controllers do not fail for that.
+async fn connect(socket: &Path) -> std::io::Result<UnixStream> {
+    let deadline = std::time::Instant::now() + RESTART_WAIT;
+    loop {
+        match UnixStream::connect(socket).await {
+            Err(error) if error.kind() != std::io::ErrorKind::PermissionDenied && std::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            result => return result,
+        }
     }
 }
 

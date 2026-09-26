@@ -13,6 +13,7 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 const UPLOAD_PARALLELISM: usize = 16;
+const REPAIR_ROUNDS: usize = 5;
 
 type Uploaded = Vec<(usize, Option<ContentHash>)>;
 
@@ -38,7 +39,53 @@ impl Disk {
         let saved_reads = profile.len();
         *self.committed.lock().unwrap() = Committed { manifest, manifest_hash, profile };
         self.profile.mark_saved(saved_reads);
+        // If this fails, the frozen files stay, and the next checkpoint checks again.
+        self.repair_missing_chunks(&uploaded).await?;
         self.clean_up_frozen(uploaded, started).await
+    }
+
+    /// GC can check a chunk's age before our upload and delete it after. The
+    /// new head then points to a missing chunk. Without conditional writes GC
+    /// and a checkpoint cannot be made atomic, but the frozen files still have
+    /// the data: check every committed chunk, and upload a missing one again.
+    async fn repair_missing_chunks(&self, uploaded: &Uploaded) -> Result<()> {
+        let committed: Vec<(usize, ContentHash)> =
+            uploaded.iter().filter_map(|&(index, hash)| hash.map(|hash| (index, hash))).collect();
+        for _ in 0..REPAIR_ROUNDS {
+            let repaired: usize = futures::stream::iter(committed.iter().copied())
+                .map(|(index, hash)| self.repair_chunk(index, hash))
+                .buffer_unordered(UPLOAD_PARALLELISM)
+                .try_fold(0, |total, repaired| async move { Ok(total + repaired as usize) })
+                .await?;
+            if repaired == 0 {
+                return Ok(());
+            }
+            log::warn!("disk {}: {repaired} chunks were deleted by GC during the commit; uploaded again", self.id);
+        }
+        bail!("disk {}: committed chunks keep vanishing from S3", self.id)
+    }
+
+    async fn repair_chunk(&self, index: usize, hash: ContentHash) -> Result<bool> {
+        if self.bucket.exists(&keys::chunk(&hash)).await? {
+            return Ok(false);
+        }
+        let data = self.read_frozen(index).await?;
+        hash.verify(&data)?;
+        self.bucket.put(&keys::chunk(&hash), data.into()).await?;
+        Ok(true)
+    }
+
+    async fn read_frozen(&self, index: usize) -> Result<Vec<u8>> {
+        let Some(file) = self.slots[index].lock().await.frozen.clone() else {
+            bail!("chunk {index} is not frozen");
+        };
+        let chunk_size = self.chunk_size as usize;
+        blocking(move || {
+            let mut data = vec![0u8; chunk_size];
+            file.read_exact_at(&mut data, 0)?;
+            Ok(data)
+        })
+        .await
     }
 
     /// Renames every `.chunk` to `.frozen`. Writes after this go to a new `.chunk`.
@@ -51,8 +98,11 @@ impl Disk {
                 // A leftover `.frozen` from a failed checkpoint is older than `.chunk`.
                 let has_old_frozen = slot.frozen.is_some();
                 let file = working.clone();
+                if let Err(error) = blocking(move || Ok(file.sync_data()?)).await {
+                    self.fail_sync(&error);
+                    return Err(error);
+                }
                 blocking(move || {
-                    file.sync_data()?;
                     if has_old_frozen {
                         folder.remove_frozen(index)?;
                     }
@@ -69,7 +119,10 @@ impl Disk {
         }
         if !frozen.is_empty() {
             let folder = self.folder.clone();
-            blocking(move || folder.sync()).await?;
+            if let Err(error) = blocking(move || folder.sync()).await {
+                self.fail_sync(&error);
+                return Err(error);
+            }
         }
         Ok(frozen)
     }
@@ -83,13 +136,8 @@ impl Disk {
     }
 
     async fn upload_one(&self, index: usize, committed_chunks: &HashSet<ContentHash>) -> Result<(usize, Option<ContentHash>)> {
-        let Some(file) = self.slots[index].lock().await.frozen.clone() else {
-            bail!("chunk {index} is not frozen");
-        };
-        let chunk_size = self.chunk_size as usize;
+        let data = self.read_frozen(index).await?;
         let (data, hash) = blocking(move || {
-            let mut data = vec![0u8; chunk_size];
-            file.read_exact_at(&mut data, 0)?;
             let hash = (!is_all_zero(&data)).then(|| ContentHash::of(&data));
             Ok((data, hash))
         })
@@ -128,7 +176,7 @@ impl Disk {
         }
     }
 
-    fn lose_ownership(&self, reason: &str) -> Result<()> {
+    pub(crate) fn lose_ownership(&self, reason: &str) -> Result<()> {
         self.ownership_lost.store(true, Ordering::SeqCst);
         log::error!("disk {}: stopped, {reason}. Local data is kept", self.id);
         bail!("disk {}: {reason}", self.id)

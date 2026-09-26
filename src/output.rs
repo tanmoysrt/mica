@@ -174,6 +174,8 @@ fn age(rfc3339: &str) -> String {
 fn note(details: &Value) -> String {
     if details["ownership_lost"] == true {
         "taken by another node".to_string()
+    } else if details["sync_failed"] == true {
+        "stopped: local sync failed".to_string()
     } else if details["behind"] == true {
         "upload is behind".to_string()
     } else {

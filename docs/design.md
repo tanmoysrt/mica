@@ -19,10 +19,11 @@ The node reads data from S3 only when the disk needs it. The node writes changes
 ## 2. Guarantees
 
 1. When a guest FLUSH completes, the data survives a crash of mica or a reboot of the node.
-2. While S3 is reachable, data older than 5 minutes is in S3. It survives the loss of the node. If uploads fall behind, mica shows the disk as **behind**.
+2. While uploads keep up, data older than about 5 minutes is in S3. It survives the loss of the node. Uploads have no deadline, so on a slow link mica shows the disk as **behind**. With `wait_when_behind`, guest writes wait instead, and the bound holds.
 3. After a detach, all data is in S3. Nothing is lost.
 4. mica never deletes local data until S3 has it.
-5. Only one node writes a disk at a time. The controller makes sure of this. mica also checks.
+5. mica detects a second writer, but cannot prevent one without conditional writes. The controller makes sure that one node owns a disk. mica reads a claim back, and checks the marker every minute and at every commit.
+6. A failed local sync stops the disk. mica never reports a flush as done when it may not be.
 
 ## 3. Architecture
 
@@ -246,7 +247,8 @@ Steps:
 3. **Manifest.** Copy the base manifest. Set the new hashes. PUT it to `manifests/`.
 4. **Check owner.** GET `attached`. It must have our `node_id`.
 5. **Commit.** PUT the new `head` with `seq + 1` and the current read profile.
-6. **Clean up.** Move each frozen file into `cache/<hash>` if no new `<index>.chunk` exists. If one exists, delete the frozen file.
+6. **Repair.** HEAD every committed chunk. Upload a missing one again from its frozen file. GC can delete a chunk between our upload and our commit; see "Garbage collection".
+7. **Clean up.** Move each frozen file into `cache/<hash>` if no new `<index>.chunk` exists. If one exists, delete the frozen file.
 
 If step 4 fails, another node owns the disk. mica stops all commits, fails all I/O on the device and reports an error. mica keeps the local data.
 
@@ -263,7 +265,7 @@ For one checkpoint: one PUT for each dirty chunk, one PUT for the manifest and o
 ### Attach
 
 1. GET `attached`.
-   - If it is missing, PUT ours.
+   - If it is missing, PUT ours with a random claim ID. Wait 1 s, then GET it again. If it has another claim ID, another node claimed at the same moment: stop with an error.
    - If it has our `node_id`, continue. mica restarted on this node.
    - If it has another `node_id`, stop with an error. Use `--force` only when the other node is down.
 2. GET `head`, then its manifest.
@@ -431,7 +433,9 @@ If GC cannot read a head, a snapshot or a kept manifest, it stops and deletes no
 |---|---|
 | Chunk size | 4 MiB, stored in the manifest |
 | Checkpoint interval | 3 minutes |
-| Maximum data loss | 5 minutes |
+| Maximum data loss | About 5 minutes while uploads keep up (`max_unsaved_minutes`) |
+| Wait when behind | Off (`wait_when_behind`) |
+| Marker check | Every minute, and at every commit |
 | Profile length | 512 chunks |
 | Prefetch parallelism | 32 GETs |
 | Upload parallelism | 16 PUTs |

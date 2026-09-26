@@ -22,7 +22,7 @@ flowchart LR
 
 - **Local-SSD speed.** Writes and flushes never wait for S3. Warm I/O runs at NVMe speed.
 - **Thin and deduplicated.** Disks use space only where they are written. Equal chunks are stored once, so images and their copies share data.
-- **At most 5 minutes of data loss**, even if a node is lost for good. None after a clean detach.
+- **About 5 minutes of data loss at most** if a node is lost for good, while uploads keep up. None after a clean detach.
 - **Snapshots and copies for free.** A snapshot is a pointer; a disk made from it copies nothing.
 - **Restart without downtime.** Upgrading or restarting mica pauses I/O for about a second.
 - **Safe on any S3.** No conditional writes needed, so R2, Ceph and Garage all work.
@@ -30,12 +30,11 @@ flowchart LR
 
 ## Quick start
 
-You need Linux 6.0 or later, systemd, and an S3 bucket.
+You need Linux 6.0 or later, systemd, an S3 bucket, and Rust with libclang (`clang-devel` on Fedora, `libclang-dev` on Debian and Ubuntu).
 
 ```bash
-cargo build --release
-sudo ./target/release/mica service setup       # asks for the bucket, installs the service
-sudo usermod -aG mica $USER && newgrp mica      # use mica without sudo
+cargo install --git https://github.com/tanmoysrt/mica
+sudo ~/.cargo/bin/mica service setup            # asks for the bucket, installs the service
 
 mica disk create data-1 --size 20G
 mica disk mount data-1 /mnt/data-1              # formats it on first use
