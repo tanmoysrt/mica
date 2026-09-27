@@ -1,6 +1,6 @@
 use crate::api::{Request, send};
 use crate::catalog::validate_name;
-use crate::daemon::Daemon;
+use crate::daemon::{Daemon, Prefetch};
 use crate::mount_tools;
 use crate::service::{self, mount_unit};
 use crate::systemd;
@@ -93,7 +93,7 @@ pub async fn mount_with_unit(
         bail!("disk {disk} is already mounted at {}", spec.path.display());
     }
     if force {
-        daemon.attach(disk, true).await?;
+        daemon.attach(disk, true, Prefetch::default()).await?;
     }
     let blank = daemon.is_blank(disk).await?;
     let spec = MountSpec { path: path.to_path_buf(), filesystem: filesystem.to_string(), owner: Some(owner) };
@@ -228,7 +228,8 @@ pub async fn unit_stop(socket: &Path, disk: &str) -> Result<()> {
 
 /// Attaches, formats a disk that was never written, and mounts it.
 async fn mount_now(socket: &Path, disk: &str, path: &Path, filesystem: &str, force: bool) -> Result<Value> {
-    let attached = send(socket, &Request::Attach { disk: disk.to_string(), force }).await?;
+    let request = Request::Attach { disk: disk.to_string(), force, prefetch: None, prefetch_parallel: None };
+    let attached = send(socket, &request).await?;
     let device = attached["device"].as_str().ok_or_else(|| anyhow!("daemon gave no device"))?.to_string();
     if mount_tools::device_mounted_at(path).ok().flatten().is_some() {
         return Ok(json!({ "path": path, "formatted": null }));

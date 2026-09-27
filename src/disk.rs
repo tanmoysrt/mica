@@ -87,10 +87,13 @@ pub struct DiskStatus {
     pub sync_failed: bool,
 }
 
-struct ChunkPart {
-    index: usize,
-    offset: u64,
-    buffer: Range<usize>,
+/// The part of a request that falls in one chunk.
+pub(crate) struct ChunkPart {
+    pub index: usize,
+    /// Offset inside the chunk.
+    pub offset: u64,
+    /// Range inside the request's buffer.
+    pub buffer: Range<usize>,
 }
 
 impl Disk {
@@ -159,14 +162,26 @@ impl Disk {
     }
 
     pub async fn write(&self, offset: u64, data: Vec<u8>) -> Result<()> {
+        self.write_parts(offset, data).await.map(|_| ())
+    }
+
+    /// A FUA write: durable when it returns. It syncs only the chunks it
+    /// wrote, not everything a full flush would.
+    pub async fn write_durable(&self, offset: u64, data: Vec<u8>) -> Result<()> {
+        let files = self.write_parts(offset, data).await?;
+        self.sync_files(files).await
+    }
+
+    async fn write_parts(&self, offset: u64, data: Vec<u8>) -> Result<Vec<Arc<File>>> {
         self.ensure_usable()?;
         self.wait_for_room().await;
         let data = Arc::new(data);
+        let mut files = Vec::new();
         for part in self.split(offset, data.len())? {
-            self.write_part(part, data.clone()).await?;
+            files.push(self.write_part(part, data.clone()).await?);
         }
         self.note_unsaved_write();
-        Ok(())
+        Ok(files)
     }
 
     /// A whole chunk becomes a sparse file of zeros, which the checkpoint
@@ -214,22 +229,25 @@ impl Disk {
                 files.push(file);
             }
         }
-        let folder_changed = self.folder_changed.swap(false, Ordering::SeqCst);
-        let folder = self.folder.clone();
-        let result = blocking(move || {
-            for file in files {
-                file.sync_data()?;
-            }
-            if folder_changed {
-                folder.sync()?;
-            }
-            Ok(())
-        })
-        .await;
-        if let Err(error) = &result {
-            // Keep them marked, and stop the disk: a retry could succeed
-            // after Linux already dropped the data.
+        let result = self.sync_files(files).await;
+        if result.is_err() {
             self.unsynced.lock().unwrap().extend(synced);
+        }
+        result
+    }
+
+    /// Syncs the files at the same time, then the folder if files were made
+    /// or renamed. A failure stops the disk: a retry could succeed after
+    /// Linux already dropped the data.
+    async fn sync_files(&self, files: Vec<Arc<File>>) -> Result<()> {
+        let folder_changed = self.folder_changed.swap(false, Ordering::SeqCst);
+        let syncs = files.into_iter().map(|file| blocking(move || Ok(file.sync_data()?)));
+        let mut result = futures::future::try_join_all(syncs).await.map(|_| ());
+        if result.is_ok() && folder_changed {
+            let folder = self.folder.clone();
+            result = blocking(move || folder.sync()).await;
+        }
+        if let Err(error) = &result {
             if folder_changed {
                 self.folder_changed.store(true, Ordering::SeqCst);
             }
@@ -321,20 +339,21 @@ impl Disk {
             return Ok(Some(file.clone()));
         }
         match slot.base {
-            Some(hash) => Ok(Some(Arc::new(self.cache.open(&hash).await?))),
+            Some(hash) => Ok(Some(self.cache.open(&hash).await?)),
             None => Ok(None),
         }
     }
 
     /// Holds the slot lock during the write, so a checkpoint cannot freeze
     /// the file while the write is still going into it.
-    async fn write_part(&self, part: ChunkPart, data: Arc<Vec<u8>>) -> Result<()> {
+    async fn write_part(&self, part: ChunkPart, data: Arc<Vec<u8>>) -> Result<Arc<File>> {
         let mut slot = self.slots[part.index].lock().await;
         let whole_chunk = part.buffer.len() as u64 == self.chunk_size;
         let file = self.working_file(&mut slot, part.index, whole_chunk).await?;
-        blocking(move || Ok(file.write_all_at(&data[part.buffer], part.offset)?)).await?;
+        let written = file.clone();
+        blocking(move || Ok(written.write_all_at(&data[part.buffer], part.offset)?)).await?;
         self.unsynced.lock().unwrap().insert(part.index);
-        Ok(())
+        Ok(file)
     }
 
     async fn zero_whole_chunk(&self, index: usize) -> Result<()> {
@@ -362,7 +381,7 @@ impl Disk {
         let source = match (&slot.frozen, slot.base) {
             (Some(frozen), _) => Some(frozen.clone()),
             (None, _) if whole_chunk => None,
-            (None, Some(hash)) => Some(Arc::new(self.cache.open(&hash).await?)),
+            (None, Some(hash)) => Some(self.cache.open(&hash).await?),
             (None, None) => None,
         };
         let folder = self.folder.clone();
@@ -389,9 +408,7 @@ impl Disk {
     async fn wait_for_room(&self) {
         loop {
             let freed = self.space_freed.notified();
-            let full = self.local_chunks.load(Ordering::SeqCst) >= self.local_chunk_limit;
-            let too_old = self.wait_when_behind && self.is_behind();
-            if !full && !too_old {
+            if self.has_room() {
                 return;
             }
             self.checkpoint_wanted.notify_one();
@@ -399,11 +416,17 @@ impl Disk {
         }
     }
 
-    fn note_unsaved_write(&self) {
+    pub(crate) fn has_room(&self) -> bool {
+        let full = self.local_chunks.load(Ordering::SeqCst) >= self.local_chunk_limit;
+        let too_old = self.wait_when_behind && self.is_behind();
+        !full && !too_old
+    }
+
+    pub(crate) fn note_unsaved_write(&self) {
         self.oldest_unsaved_write.lock().unwrap().get_or_insert_with(Instant::now);
     }
 
-    fn split(&self, offset: u64, len: usize) -> Result<Vec<ChunkPart>> {
+    pub(crate) fn split(&self, offset: u64, len: usize) -> Result<Vec<ChunkPart>> {
         let end = offset + len as u64;
         if end > self.size {
             bail!("I/O at {offset}+{len} is past the end of the disk ({})", self.size);

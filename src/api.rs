@@ -1,4 +1,4 @@
-use crate::daemon::Daemon;
+use crate::daemon::{Daemon, Prefetch};
 use crate::managed_mount::{self, FolderOwner};
 use crate::ownership::{self, Owner};
 use anyhow::{Context, Result, bail, ensure};
@@ -21,7 +21,14 @@ pub enum Request {
     Create { disk: String, size: Option<u64>, from_snapshot: Option<String> },
     Snapshot { disk: String, name: String },
     Resize { disk: String, size: u64 },
-    Attach { disk: String, force: bool },
+    Attach {
+        disk: String,
+        force: bool,
+        #[serde(default)]
+        prefetch: Option<usize>,
+        #[serde(default)]
+        prefetch_parallel: Option<usize>,
+    },
     Detach { disk: String },
     Mount { disk: String, path: PathBuf, filesystem: String, force: bool, owner: FolderOwner },
     Umount { target: String },
@@ -33,6 +40,11 @@ pub enum Request {
     DescribeSnapshots { names: Vec<String> },
     DeleteSnapshot { name: String },
     Gc { delete: bool, grace_secs: Option<u64> },
+    Warm {
+        disk: String,
+        #[serde(default)]
+        parallel: Option<usize>,
+    },
     CacheStatus,
     CachePrune { delete: bool },
 }
@@ -145,10 +157,10 @@ async fn dispatch(daemon: &Arc<Daemon>, request: Request, caller_uid: Option<u32
             daemon.catalog().resize(&disk, size).await?;
             Ok(json!({ "disk": disk, "size": size }))
         }
-        Request::Attach { disk, force } => {
+        Request::Attach { disk, force, prefetch, prefetch_parallel } => {
             // Taking a disk from another node can lose its data, so only root may.
             ensure!(!force || caller_is_root, "--force needs root");
-            daemon.attach(&disk, force).await
+            daemon.attach(&disk, force, Prefetch { chunks: prefetch, parallel: prefetch_parallel }).await
         }
         Request::Detach { disk } => daemon.detach(&disk).await,
         Request::Mount { disk, path, filesystem, force, owner } => {
@@ -170,6 +182,7 @@ async fn dispatch(daemon: &Arc<Daemon>, request: Request, caller_uid: Option<u32
         }
         Request::ListSnapshots => Ok(json!({ "snapshots": daemon.catalog().list_snapshots().await? })),
         Request::DescribeSnapshots { names } => describe_snapshots(daemon, names).await,
+        Request::Warm { disk, parallel } => daemon.warm(&disk, parallel).await,
         Request::CacheStatus => Ok(daemon.cache_usage().await),
         Request::CachePrune { delete } => daemon.prune_cache(delete).await,
         Request::Gc { delete, grace_secs } => daemon.collect_garbage(delete, grace_secs).await,

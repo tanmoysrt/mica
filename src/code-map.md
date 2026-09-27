@@ -62,6 +62,8 @@ Then read the helper files in the table below when you need them.
 |---|---|
 | `node.rs` | `NodeIdentity`: the random node ID in `<data_dir>/node-id`, and the hostname. |
 | `local_state.rs` | `DiskFolder`: `<data_dir>/disks/<disk-id>/`, its `state` file (attached or orphaned). |
+| `local_io.rs` | Plans reads and writes that the queue thread can serve alone, from local data. |
+| `queue_io.rs` | Does those reads and writes with io_uring on the queue thread. |
 | `ublk_device.rs` | `UblkDevice`: start, recover and stop `/dev/ublkbN`. Maps each ublk request to a `Disk` call. Makes `/dev/mica/<disk-id>`. |
 | `mount_tools.rs` | CLI helpers: `mkfs`, `mount`, `umount`, and search in `/proc/self/mounts`. |
 | `blocking.rs` | `blocking()`: runs file I/O on the tokio blocking pool. |
@@ -117,6 +119,7 @@ The CLI sends a `Mount` request. The daemon (`managed_mount::mount_with_unit`) c
 - Each chunk has its own async lock (`ChunkSlot` in `disk.rs`). A write holds it until the data is in the file. Thus a checkpoint cannot freeze a file while a write goes into it.
 - Only one checkpoint runs at a time (`checkpoint_running`).
 - File I/O runs on the blocking pool (`blocking.rs`).
-- ublk queue threads run a smol executor. They hand each request to tokio in `on_tokio` in `ublk_device.rs`.
+- ublk queue threads run a smol executor. A request that only needs local data is served on the queue thread with io_uring (`local_io.rs`, `queue_io.rs`). Other requests go to tokio in `on_tokio` in `ublk_device.rs`.
+- A local write holds its chunk locks until the data is in the files, the same rule as the tokio path.
 - A queue thread sleeps inside io_uring. Only an io_uring completion wakes it. When tokio finishes a request, it writes to an eventfd (`QueueWaker`) that the queue always reads. The result goes into a channel before this write, so the thread never wakes too early.
 - The daemon runs in its own mount namespace with slave propagation. Mounts made in the daemon stay inside it. Unmounts on the host still reach it.

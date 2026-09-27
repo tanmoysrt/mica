@@ -25,7 +25,12 @@ pub struct ChunkCache {
     bucket: Arc<Bucket>,
     index: Mutex<CacheIndex>,
     downloads: Mutex<HashMap<ContentHash, Arc<tokio::sync::Mutex<()>>>>,
+    /// Open handles of hot chunks, so a read does not open the file again.
+    open_files: Mutex<HashMap<ContentHash, Arc<File>>>,
 }
+
+/// More open cache files than this, and one handle is closed for each new one.
+const OPEN_FILE_LIMIT: usize = 1024;
 
 #[derive(Default)]
 struct CacheIndex {
@@ -48,13 +53,14 @@ impl ChunkCache {
             bucket,
             index: Mutex::default(),
             downloads: Mutex::default(),
+            open_files: Mutex::default(),
         };
         cache.scan()?;
         Ok(cache)
     }
 
     /// Opens a chunk, and gets it from S3 first if it is not here.
-    pub async fn open(&self, hash: &ContentHash) -> Result<File> {
+    pub async fn open(&self, hash: &ContentHash) -> Result<Arc<File>> {
         if let Some(file) = self.open_local(hash) {
             return Ok(file);
         }
@@ -85,6 +91,20 @@ impl ChunkCache {
         usage
     }
 
+    pub fn has(&self, hash: &ContentHash) -> bool {
+        self.index.lock().unwrap().entries.contains_key(hash)
+    }
+
+    pub fn limit_bytes(&self) -> u64 {
+        self.limit_bytes
+    }
+
+    /// Opens a chunk only if it is here. It never downloads, so the ublk
+    /// queue thread can call it.
+    pub fn open_cached(&self, hash: &ContentHash) -> Option<Arc<File>> {
+        self.open_local(hash)
+    }
+
     /// Deletes every chunk not in `keep`. S3 has all of them, so a chunk
     /// that is needed again is downloaded again. Returns the count and bytes.
     pub fn prune(&self, keep: &HashSet<ContentHash>) -> (usize, u64) {
@@ -94,9 +114,7 @@ impl ChunkCache {
         for hash in unused {
             let entry = index.entries.remove(&hash).unwrap();
             index.total_bytes -= entry.bytes;
-            if let Err(error) = std::fs::remove_file(self.path(&hash)) {
-                log::warn!("cache: cannot delete chunk {hash}: {error}");
-            }
+            self.delete_file(&hash);
             count += 1;
             bytes += entry.bytes;
         }
@@ -138,8 +156,22 @@ impl ChunkCache {
         Ok(())
     }
 
-    fn open_local(&self, hash: &ContentHash) -> Option<File> {
-        let file = File::open(self.path(hash)).ok()?;
+    fn open_local(&self, hash: &ContentHash) -> Option<Arc<File>> {
+        let known = self.open_files.lock().unwrap().get(hash).cloned();
+        let file = match known {
+            Some(file) => file,
+            None => {
+                let file = Arc::new(File::open(self.path(hash)).ok()?);
+                let mut open_files = self.open_files.lock().unwrap();
+                if open_files.len() >= OPEN_FILE_LIMIT
+                    && let Some(old) = open_files.keys().next().copied()
+                {
+                    open_files.remove(&old);
+                }
+                open_files.insert(*hash, file.clone());
+                file
+            }
+        };
         let mut index = self.index.lock().unwrap();
         index.clock += 1;
         let now = index.clock;
@@ -179,9 +211,16 @@ impl ChunkCache {
             }
             let entry = index.entries.remove(&hash).unwrap();
             index.total_bytes -= entry.bytes;
-            if let Err(error) = std::fs::remove_file(self.path(&hash)) {
-                log::warn!("cache: cannot delete chunk {hash}: {error}");
-            }
+            self.delete_file(&hash);
+        }
+    }
+
+    /// Closes our handle too: an open handle keeps a deleted file's space in
+    /// use. A reader that holds its own handle still reads it safely.
+    fn delete_file(&self, hash: &ContentHash) {
+        self.open_files.lock().unwrap().remove(hash);
+        if let Err(error) = std::fs::remove_file(self.path(hash)) {
+            log::warn!("cache: cannot delete chunk {hash}: {error}");
         }
     }
 

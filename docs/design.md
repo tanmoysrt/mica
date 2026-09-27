@@ -271,7 +271,7 @@ For one checkpoint: one PUT for each dirty chunk, one PUT for the manifest and o
 2. GET `head`, then its manifest.
 3. Make the chunk map.
 4. If `disks/<disk-id>/` exists on this node, load the dirty files into the map.
-5. Start the prefetch of the profile.
+5. If `--prefetch` was passed, start the prefetch (see "Fast boot").
 6. Make the ublk device. Make the link `/dev/mica/<disk-id>` to it.
 
 ### Use the device
@@ -375,7 +375,9 @@ A cold boot reads many chunks from all over the disk. One GET at a time, this ta
 
 1. While a disk is attached, mica records the order in which the guest reads chunks the first time. It keeps the first 512 chunks (2 GiB). Reads from the prefetch are not recorded. If they were, the profile would never change.
 2. Each checkpoint writes the list into `head`. The list is a few KB. At detach, mica writes `head` also when only the profile changed.
-3. At attach, mica GETs the chunks in the profile, 32 at a time, in the recorded order. Reads from the guest go first.
+3. At attach, only if the caller asks with `mica disk attach --prefetch <chunks>`, mica GETs that many chunks from the start of the profile, in the recorded order, 8 at a time (`--prefetch-parallel` changes it). Guest reads do not wait for it.
+
+Without the flag there is no prefetch. On a slow link it takes bandwidth that the guest needs now, for chunks it may need later. On a fast link near S3 it makes a cold boot run from local disk. The profile is recorded either way, so prefetch can be turned on at any time.
 
 For labs, the image profile comes from its first boot, so every later boot is fast. For sandboxes, the profile comes from the last session, so the working set of the user is ready first.
 
@@ -437,7 +439,8 @@ If GC cannot read a head, a snapshot or a kept manifest, it stops and deletes no
 | Wait when behind | Off (`wait_when_behind`) |
 | Marker check | Every minute, and at every commit |
 | Profile length | 512 chunks |
-| Prefetch parallelism | 32 GETs |
+| Prefetch on attach | None, unless `--prefetch` is passed |
+| Prefetch parallelism | 8 GETs (`--prefetch-parallel`) |
 | Upload parallelism | 16 PUTs |
 | Dirty space high-water mark | 50% of the dirty limit |
 

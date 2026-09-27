@@ -154,11 +154,20 @@ flowchart TD
 - The `.tmp` step means that a crash never leaves a half-copied chunk that looks complete.
 - The chunk lock is held until the data is in the file. Thus a checkpoint cannot freeze a chunk while a write goes into it.
 
+## Where a request runs
+
+Each device has one queue thread per CPU, up to 4. A queue thread first tries to serve a request by itself:
+
+- **A read** whose chunks are all local (a dirty chunk, a cached chunk or zeros) is read with io_uring straight into the request buffer.
+- **A write** into chunks that already have a `.chunk` file is written with io_uring. A FUA write also syncs those files through the same ring.
+
+This needs no lock wait, no S3 and no other thread. Anything else goes to the disk engine on tokio: a chunk that is missing locally, a chunk without a `.chunk` file yet, a busy lock, a full local disk, discards and flushes.
+
 ## Flush
 
 The device tells the kernel that it has a volatile write cache. So filesystems send FLUSH when they need durability (`fsync`, journal commits, `umount`).
 
-On FLUSH, mica syncs every changed `.chunk` file and the dirty folder, then returns. **A flush never touches S3.** When a flush returns, the data survives a crash of mica or a reboot of the node.
+On FLUSH, mica syncs every changed `.chunk` file at the same time, then the dirty folder, then returns. A FUA write syncs only the chunks it wrote. **A flush never touches S3.** When a flush returns, the data survives a crash of mica or a reboot of the node.
 
 ## Discard
 
@@ -216,7 +225,7 @@ stateDiagram-v2
 2. Read the head, then the manifest.
 3. Add any local chunks left by a crash.
 4. Make the ublk device and the link `/dev/mica/<disk>`.
-5. Start the checkpoint loop, the prefetch, and a watcher that reads the marker every minute.
+5. Start the checkpoint loop, a watcher that reads the marker every minute, and, if it is on, the prefetch.
 
 **Detach** always waits. When it returns, S3 has all the data and the disk is free.
 
@@ -245,7 +254,7 @@ sequenceDiagram
     B->>S: PUT disks/disk-1/attached (node B)
     B->>S: GET head, GET manifest
     B->>B: Make /dev/mica/disk-1
-    B->>S: Prefetch the chunks from the last read profile
+    B->>S: Prefetch from the last read profile (if on)
     Note over B: Boots. Other chunks come on demand.
 ```
 
@@ -255,7 +264,9 @@ Node B copies nothing up front. A 100 GiB disk attaches with two GETs, and only 
 
 A cold boot reads chunks from all over the disk. One GET at a time, that is slow. So mica records a **read profile**: the first 512 chunks the guest reads in a session, in order. Each checkpoint saves it in the head.
 
-At the next attach, mica fetches those chunks, 32 at a time, before the guest asks for them. For an image, the profile comes from its first boot. For a sandbox, it comes from the last session, so the user's working set is ready first. Prefetch reads are never recorded, so the profile keeps up with the guest.
+At the next attach, mica can fetch the first chunks of that list before the guest asks for them. For an image, the profile comes from its first boot. For a sandbox, it comes from the last session, so the user's working set is ready first. Prefetch reads are never recorded, so the profile keeps up with the guest.
+
+Prefetch runs only when asked for, because on a slow link it competes with the reads the guest needs now: `mica disk attach <disk> --prefetch 32` downloads the first 32 chunks (128 MiB) of the profile, 8 at a time. `--prefetch-parallel` changes the 8.
 
 ## Daemon restart without downtime
 

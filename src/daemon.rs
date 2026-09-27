@@ -8,9 +8,10 @@ use crate::disk::{Disk, DiskParts};
 use crate::local_state::{DiskFolder, LocalStatus};
 use crate::node::NodeIdentity;
 use crate::ownership;
-use crate::read_profile::prefetch;
+use crate::read_profile;
 use crate::ublk_device::{UblkDevice, link_device, unlink_device};
 use anyhow::{Result, bail};
+use futures::StreamExt;
 use serde_json::{Value, json};
 use crate::content_hash::ContentHash;
 use std::collections::{HashMap, HashSet};
@@ -22,6 +23,8 @@ use tokio::sync::Mutex;
 const RETRY_DELAY: Duration = Duration::from_secs(10);
 const BUSY_RETRIES: usize = 15;
 const DRAIN_POLL: Duration = Duration::from_secs(1);
+const DEFAULT_PREFETCH_PARALLEL: usize = 8;
+const DEFAULT_WARM_PARALLEL: usize = 8;
 
 pub struct Daemon {
     pub(crate) config: Config,
@@ -31,6 +34,13 @@ pub struct Daemon {
     pub(crate) node: Arc<NodeIdentity>,
     pub(crate) disks: Mutex<HashMap<String, AttachedDisk>>,
     gc_running: Mutex<()>,
+}
+
+/// Prefetch for one attach. Without `chunks` there is no prefetch.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Prefetch {
+    pub chunks: Option<usize>,
+    pub parallel: Option<usize>,
 }
 
 pub(crate) struct AttachedDisk {
@@ -75,7 +85,8 @@ impl Daemon {
 
     /// Attaching a disk that is already attached here returns its device.
     /// A disk that is still uploading here is waited for, then attached again.
-    pub async fn attach(&self, disk_id: &str, force: bool) -> Result<Value> {
+    /// Prefetch runs only when the caller asks for it.
+    pub async fn attach(&self, disk_id: &str, force: bool, prefetch: Prefetch) -> Result<Value> {
         validate_name(disk_id)?;
         let mut disks = loop {
             let disks = self.disks.lock().await;
@@ -99,7 +110,12 @@ impl Daemon {
             }
         };
         log::info!("disk {disk_id}: attached as {}", device.path);
-        tokio::spawn(prefetch(disk.clone(), disk.committed_profile()));
+        let chunks = prefetch.chunks.unwrap_or(0);
+        if chunks > 0 {
+            let parallel = prefetch.parallel.unwrap_or(DEFAULT_PREFETCH_PARALLEL);
+            let profile: Vec<u32> = disk.committed_profile().into_iter().take(chunks).collect();
+            tokio::spawn(read_profile::prefetch(disk.clone(), profile, parallel));
+        }
         self.activate(&mut disks, &folder, disk, device)
     }
 
@@ -124,6 +140,38 @@ impl Daemon {
         // A separate task, so the upload goes on even if the client disconnects.
         tokio::spawn(self.clone().drain(disk)).await??;
         Ok(json!({ "detached": disk_id }))
+    }
+
+    /// Downloads every chunk of a disk that the cache does not have, so that
+    /// its reads never wait for S3. Works on a detached disk too.
+    pub async fn warm(&self, disk_id: &str, parallel: Option<usize>) -> Result<Value> {
+        validate_name(disk_id)?;
+        let attached = self.disks.lock().await.get(disk_id).map(|attached| attached.disk.clone());
+        let (hashes, chunk_size) = match attached {
+            Some(disk) => (disk.committed_chunks(), disk.chunk_size),
+            None => {
+                let manifest = self.catalog().load(disk_id).await?.manifest;
+                (manifest.chunks.iter().flatten().copied().collect(), manifest.chunk_size)
+            }
+        };
+        let missing: Vec<ContentHash> = hashes.iter().filter(|hash| !self.cache.has(hash)).copied().collect();
+        let results: Vec<bool> = futures::stream::iter(missing)
+            .map(|hash| {
+                let cache = self.cache.clone();
+                async move { cache.open(&hash).await.is_ok() }
+            })
+            .buffer_unordered(parallel.unwrap_or(DEFAULT_WARM_PARALLEL).max(1))
+            .collect()
+            .await;
+        let downloaded = results.iter().filter(|ok| **ok).count();
+        Ok(json!({
+            "chunks": hashes.len(),
+            "downloaded": downloaded,
+            "failed": results.len() - downloaded,
+            "downloaded_bytes": downloaded as u64 * chunk_size,
+            "disk_bytes": hashes.len() as u64 * chunk_size,
+            "cache_limit_bytes": self.cache.limit_bytes(),
+        }))
     }
 
     /// One GC at a time on this node. The S3 lock covers other nodes.

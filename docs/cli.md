@@ -69,6 +69,21 @@ mica disk create sandbox-8 --from-snapshot base-image --size 40G
 
 A disk is thin: it uses no space until it is written. Disk names use letters, digits, `-`, `_` and `.`.
 
+### disk warm
+
+Downloads every chunk of a disk that the local cache does not have, several at a time. Later reads of the disk never wait for S3. It works on an attached or a detached disk, so a node can be warmed with a base image before any sandbox starts.
+
+```text
+$ mica disk warm base-image
+Warmed disk base-image: downloaded 173 chunks (692MiB); 135 of 308 were cached already
+```
+
+| Option | Meaning |
+|---|---|
+| `--parallel <N>` | Downloads at the same time. Default: 8. |
+
+A disk whose data is larger than the cache limit stays only partly cached.
+
 ### disk attach
 
 Makes `/dev/mica/<disk>` on this node. Use it to give a raw disk to a VM.
@@ -79,6 +94,8 @@ mica disk attach disk-1
 
 | Option | Meaning |
 |---|---|
+| `--prefetch <CHUNKS>` | Download this many chunks (4 MiB) of the read profile in the background. Without it, there is no prefetch. |
+| `--prefetch-parallel <N>` | Downloads at the same time for this disk's prefetch. Default: 8. |
 | `--force` | Take the disk from another node. Root only. Use it only when that node is down: see [reliability.md](reliability.md#fencing-without-conditional-writes). |
 
 Attaching a disk that is already attached here returns its device. Attaching a disk that is still uploading here waits for the upload.

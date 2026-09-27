@@ -25,9 +25,22 @@ pub enum DiskCommand {
         #[arg(long, value_name = "SNAPSHOT")]
         from_snapshot: Option<String>,
     },
+    /// Download a disk's chunks into the local cache
+    Warm {
+        disk: String,
+        /// Downloads at the same time [default: 8]
+        #[arg(long, value_name = "N")]
+        parallel: Option<usize>,
+    },
     /// Attach a disk as /dev/mica/<disk>
     Attach {
         disk: String,
+        /// Chunks (4 MiB) of the read profile to download in the background [default: none]
+        #[arg(long, value_name = "CHUNKS")]
+        prefetch: Option<usize>,
+        /// Downloads at the same time for this disk's prefetch [default: 8]
+        #[arg(long, value_name = "N")]
+        prefetch_parallel: Option<usize>,
         /// Take the disk from another node (root only)
         #[arg(long)]
         force: bool,
@@ -82,8 +95,10 @@ pub async fn run(command: DiskCommand, socket: &Path) -> Result<()> {
                 None => println!("Created disk {disk} ({size})"),
             }
         }
-        DiskCommand::Attach { disk, force } => {
-            let result = send(socket, &Request::Attach { disk: disk.clone(), force }).await?;
+        DiskCommand::Warm { disk, parallel } => warm(socket, &disk, parallel).await?,
+        DiskCommand::Attach { disk, prefetch, prefetch_parallel, force } => {
+            let request = Request::Attach { disk: disk.clone(), force, prefetch, prefetch_parallel };
+            let result = send(socket, &request).await?;
             println!("Attached disk {disk} at {}", result["device"].as_str().unwrap_or("?"));
         }
         DiskCommand::Mount { disk, path, fs, owner, force } => {
@@ -106,6 +121,25 @@ pub async fn run(command: DiskCommand, socket: &Path) -> Result<()> {
                 println!("Deleted disk {disk}");
             }
         }
+    }
+    Ok(())
+}
+
+async fn warm(socket: &Path, disk: &str, parallel: Option<usize>) -> Result<()> {
+    let result = send(socket, &Request::Warm { disk: disk.to_string(), parallel }).await?;
+    let number = |key: &str| result[key].as_u64().unwrap_or(0);
+    println!(
+        "Warmed disk {disk}: downloaded {} chunks ({}); {} of {} were cached already",
+        number("downloaded"),
+        bytes(number("downloaded_bytes")),
+        number("chunks") - number("downloaded") - number("failed"),
+        number("chunks")
+    );
+    if number("failed") > 0 {
+        println!("{} chunks failed to download. Run it again to retry them", number("failed"));
+    }
+    if number("disk_bytes") > number("cache_limit_bytes") {
+        println!("The disk's data is larger than the cache limit, so only part of it stays cached");
     }
     Ok(())
 }

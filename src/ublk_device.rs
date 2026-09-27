@@ -1,4 +1,5 @@
 use crate::disk::Disk;
+use crate::queue_io;
 use anyhow::{Context, Result, anyhow, bail};
 use libublk::ctrl::{UblkCtrl, UblkCtrlBuilder};
 use libublk::helpers::IoBuf;
@@ -16,6 +17,12 @@ use std::time::Duration;
 use tokio::runtime::Handle;
 
 const QUEUE_DEPTH: u16 = 64;
+/// One queue thread per CPU, up to this many. Parallel I/O then uses more
+/// than one CPU. A device taken over after a restart keeps its own count.
+const MAX_QUEUES: u16 = 4;
+/// Room in each queue's ring for the ublk commands and the file I/O that
+/// the queue thread does itself: up to two chunk parts per request, and a sync.
+const RING_DEPTH: u16 = QUEUE_DEPTH * 4;
 const IO_BUFFER_BYTES: u32 = 512 << 10;
 
 /// The `/dev/ublkbN` block device of one disk. ublk only turns kernel block
@@ -65,7 +72,7 @@ impl UblkDevice {
         ensure_control_ring()?;
         let builder = UblkCtrlBuilder::default()
             .name("mica")
-            .nr_queues(1)
+            .nr_queues(queue_count())
             .depth(QUEUE_DEPTH)
             .io_buf_bytes(IO_BUFFER_BYTES)
             .ctrl_flags(sys::UBLK_F_USER_RECOVERY as u64 | sys::UBLK_F_USER_RECOVERY_REISSUE as u64);
@@ -135,6 +142,8 @@ fn ensure_control_ring() -> Result<()> {
 /// guests free chunks with fstrim.
 fn set_device_params(dev: &mut UblkDev, size: u64, chunk_size: u32) {
     dev.set_default_params(size);
+    dev.tgt.sq_depth = RING_DEPTH;
+    dev.tgt.cq_depth = RING_DEPTH;
     let params = &mut dev.tgt.params;
     params.basic.attrs = sys::UBLK_ATTR_VOLATILE_CACHE | sys::UBLK_ATTR_FUA;
     params.types |= sys::UBLK_PARAM_TYPE_DISCARD;
@@ -210,8 +219,22 @@ async fn handle_request(
 ) -> i32 {
     let offset = request.start_sector << 9;
     let len = (request.nr_sectors as usize) << 9;
+    let op = request.op_flags & 0xff;
+    let durable = request.op_flags & sys::UBLK_IO_F_FUA != 0;
+    // Local data is served on this thread. Anything that needs S3, a new
+    // chunk file, or a busy lock goes to tokio below.
+    if op == sys::UBLK_IO_OP_READ
+        && let Some(plan) = disk.plan_local_read(offset, len)
+    {
+        return queue_io::read_local(plan, &mut buffer[..len]).await;
+    }
+    if op == sys::UBLK_IO_OP_WRITE
+        && let Some(plan) = disk.plan_local_write(offset, len, durable)
+    {
+        return queue_io::write_local(plan, &buffer[..len], durable).await;
+    }
     let disk = disk.clone();
-    let outcome = match request.op_flags & 0xff {
+    let outcome = match op {
         sys::UBLK_IO_OP_READ => on_tokio(runtime, waker, async move { disk.read(offset, len).await })
             .await
             .map(|data| {
@@ -220,11 +243,10 @@ async fn handle_request(
             }),
         sys::UBLK_IO_OP_WRITE => {
             let data = buffer[..len].to_vec();
-            let force_unit_access = request.op_flags & sys::UBLK_IO_F_FUA != 0;
             on_tokio(runtime, waker, async move {
-                disk.write(offset, data).await?;
-                if force_unit_access {
-                    disk.flush().await?;
+                match durable {
+                    true => disk.write_durable(offset, data).await?,
+                    false => disk.write(offset, data).await?,
                 }
                 Ok(len as i32)
             })
@@ -306,4 +328,9 @@ pub fn link_device(disk_id: &str, device: &str) -> Result<String> {
 
 pub fn unlink_device(link: &str) {
     let _ = std::fs::remove_file(link);
+}
+
+fn queue_count() -> u16 {
+    let cpus = std::thread::available_parallelism().map(|count| count.get()).unwrap_or(1);
+    (cpus as u16).clamp(1, MAX_QUEUES)
 }

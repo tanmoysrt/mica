@@ -155,7 +155,17 @@ mica snapshot create builder base-image
 mica disk create sandbox-1 --from-snapshot base-image
 ```
 
-The first boot records a read profile. Every disk made from the snapshot prefetches those chunks at attach, so it boots fast.
+The first boot records a read profile, and every disk made from the snapshot carries it. With `mica disk attach <disk> --prefetch <chunks>`, those chunks download in the background at attach. A node that keeps the base image's chunks in its cache boots such disks without any downloads.
+
+### Warming a node
+
+To make every sandbox from an image start without downloads, warm the node once:
+
+```bash
+mica disk warm base-image
+```
+
+The chunks stay in the cache while any attached disk uses them. `mica cache prune` keeps them for as long as one such disk is attached.
 
 ### Cleaning up
 

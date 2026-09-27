@@ -4,7 +4,6 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 const PROFILE_LENGTH: usize = 512;
-const PREFETCH_PARALLELISM: usize = 32;
 
 /// The order in which the guest first reads chunks in this session.
 /// Prefetch reads are never recorded; if they were, the profile would never change.
@@ -48,13 +47,13 @@ impl ReadProfile {
     }
 }
 
-/// Fetches the chunks of the last profile, in order. Guest reads do not
-/// wait for this; they fetch their own chunks.
-pub async fn prefetch(disk: Arc<Disk>, profile: Vec<u32>) {
+/// Fetches chunks from the last profile, in order. Guest reads do not wait
+/// for this; they fetch their own chunks.
+pub async fn prefetch(disk: Arc<Disk>, profile: Vec<u32>, parallel_downloads: usize) {
     let total = profile.len();
     futures::stream::iter(profile)
         .take_while(|_| std::future::ready(!disk.is_closed()))
-        .for_each_concurrent(PREFETCH_PARALLELISM, |index| {
+        .for_each_concurrent(parallel_downloads.max(1), |index| {
             let disk = disk.clone();
             async move {
                 if let Err(error) = disk.prefetch_chunk(index as usize).await {
