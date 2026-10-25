@@ -24,7 +24,12 @@ pub enum DiskCommand {
         /// Start from this snapshot
         #[arg(long, value_name = "SNAPSHOT")]
         from_snapshot: Option<String>,
+        /// Chunk size of a new disk: 64K, 256K, 1M or 4M [default: 256K]
+        #[arg(long, value_name = "SIZE")]
+        chunk_size: Option<String>,
     },
+    /// Upload the changes of an attached disk now, without a detach
+    Checkpoint { disk: String },
     /// Download a disk's chunks into the local cache
     Warm {
         disk: String,
@@ -35,9 +40,12 @@ pub enum DiskCommand {
     /// Attach a disk as /dev/mica/<disk>
     Attach {
         disk: String,
-        /// Chunks (4 MiB) of the read profile to download in the background [default: none]
+        /// Chunks of the read profile to download at attach [default: all, up to 64 MiB]
         #[arg(long, value_name = "CHUNKS")]
         prefetch: Option<usize>,
+        /// Do not download the rest of the disk in the background
+        #[arg(long)]
+        no_fill: bool,
         /// Downloads at the same time for this disk's prefetch [default: 8]
         #[arg(long, value_name = "N")]
         prefetch_parallel: Option<usize>,
@@ -85,9 +93,10 @@ pub enum DiskCommand {
 pub async fn run(command: DiskCommand, socket: &Path) -> Result<()> {
     match command {
         DiskCommand::Ls { yes } => list(socket, yes).await?,
-        DiskCommand::Create { disk, size, from_snapshot } => {
+        DiskCommand::Create { disk, size, from_snapshot, chunk_size } => {
             let size = size.as_deref().map(parse_size).transpose()?;
-            let request = Request::Create { disk: disk.clone(), size, from_snapshot: from_snapshot.clone() };
+            let chunk_size = chunk_size.as_deref().map(parse_size).transpose()?;
+            let request = Request::Create { disk: disk.clone(), size, from_snapshot: from_snapshot.clone(), chunk_size };
             let result = send(socket, &request).await?;
             let size = bytes(result["size"].as_u64().unwrap_or(0));
             match from_snapshot {
@@ -95,9 +104,19 @@ pub async fn run(command: DiskCommand, socket: &Path) -> Result<()> {
                 None => println!("Created disk {disk} ({size})"),
             }
         }
+        DiskCommand::Checkpoint { disk } => {
+            let result = send(socket, &Request::Checkpoint { disk: disk.clone() }).await?;
+            println!(
+                "Saved disk {disk} in S3 (seq {}, {} ms). Not in S3 now: {}",
+                result["seq"],
+                result["ms"],
+                bytes(result["unsaved_bytes"].as_u64().unwrap_or(0))
+            );
+        }
         DiskCommand::Warm { disk, parallel } => warm(socket, &disk, parallel).await?,
-        DiskCommand::Attach { disk, prefetch, prefetch_parallel, force } => {
-            let request = Request::Attach { disk: disk.clone(), force, prefetch, prefetch_parallel };
+        DiskCommand::Attach { disk, prefetch, no_fill, prefetch_parallel, force } => {
+            let fill = no_fill.then_some(false);
+            let request = Request::Attach { disk: disk.clone(), force, prefetch, prefetch_parallel, fill };
             let result = send(socket, &request).await?;
             println!("Attached disk {disk} at {}", result["device"].as_str().unwrap_or("?"));
         }

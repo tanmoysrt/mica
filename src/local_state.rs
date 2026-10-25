@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -62,16 +62,25 @@ impl DiskFolder {
         self.path.join("dirty")
     }
 
+    /// True when the folder may hold local changes that S3 does not have.
     pub fn has_chunks(&self) -> Result<bool> {
-        match std::fs::read_dir(self.dirty_path()) {
-            Ok(mut entries) => Ok(entries.next().is_some()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(error.into()),
-        }
+        crate::local_data::has_entries(&self.dirty_path(), &self.recent_path())
+    }
+
+    /// The bitmap of chunks not logged yet, in /run: it lives as long as
+    /// the boot. See `LocalData::open`.
+    pub fn recent_path(&self) -> PathBuf {
+        let data_dir = self.path.parent().and_then(Path::parent).unwrap_or(Path::new("/"));
+        let node = data_dir.to_string_lossy().trim_matches('/').replace('/', "-");
+        PathBuf::from("/run/mica/sessions").join(node).join(format!("{}.recent", self.disk_id))
     }
 
     pub fn remove_chunks(&self) -> Result<()> {
         remove_dir(&self.dirty_path())?;
+        match std::fs::remove_file(self.recent_path()) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+            _ => {}
+        }
         std::fs::File::open(&self.path)?.sync_all()?;
         Ok(())
     }
@@ -90,9 +99,16 @@ impl DiskFolder {
         }
     }
 
+    /// Synced and renamed into place: after a power loss the file is whole,
+    /// and the disk folder exists, or neither.
     fn write_state(&self, state: &StateFile) -> Result<()> {
-        std::fs::create_dir_all(&self.path).with_context(|| format!("create {}", self.path.display()))?;
-        std::fs::write(self.state_path(), serde_json::to_vec(state)?)?;
+        crate::local_data::create_dir_durable(&self.path)?;
+        let temp = self.path.join("state.tmp");
+        let mut file = std::fs::File::create(&temp)?;
+        std::io::Write::write_all(&mut file, &serde_json::to_vec(state)?)?;
+        file.sync_all()?;
+        std::fs::rename(&temp, self.state_path())?;
+        std::fs::File::open(&self.path)?.sync_all()?;
         Ok(())
     }
 

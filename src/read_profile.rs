@@ -1,14 +1,14 @@
-use crate::disk::Disk;
-use futures::StreamExt;
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
-const PROFILE_LENGTH: usize = 512;
+/// The profile covers the first reads of a session, up to this many bytes.
+const PROFILE_BYTES: u64 = 64 << 20;
 
 /// The order in which the guest first reads chunks in this session.
 /// Prefetch reads are never recorded; if they were, the profile would never change.
 pub struct ReadProfile {
     state: Mutex<ProfileState>,
+    length: usize,
 }
 
 #[derive(Default)]
@@ -19,13 +19,13 @@ struct ProfileState {
 }
 
 impl ReadProfile {
-    pub fn new() -> Self {
-        Self { state: Mutex::default() }
+    pub fn new(chunk_size: u64) -> Self {
+        Self { state: Mutex::default(), length: (PROFILE_BYTES / chunk_size).max(16) as usize }
     }
 
     pub fn record(&self, index: usize) {
         let mut state = self.state.lock().unwrap();
-        if state.order.len() < PROFILE_LENGTH && state.seen.insert(index) {
+        if state.order.len() < self.length && state.seen.insert(index) {
             state.order.push(index as u32);
         }
     }
@@ -45,22 +45,4 @@ impl ReadProfile {
         let mut state = self.state.lock().unwrap();
         state.saved_len = state.saved_len.max(len.min(state.order.len()));
     }
-}
-
-/// Fetches chunks from the last profile, in order. Guest reads do not wait
-/// for this; they fetch their own chunks.
-pub async fn prefetch(disk: Arc<Disk>, profile: Vec<u32>, parallel_downloads: usize) {
-    let total = profile.len();
-    futures::stream::iter(profile)
-        .take_while(|_| std::future::ready(!disk.is_closed()))
-        .for_each_concurrent(parallel_downloads.max(1), |index| {
-            let disk = disk.clone();
-            async move {
-                if let Err(error) = disk.prefetch_chunk(index as usize).await {
-                    log::warn!("disk {}: prefetch of chunk {index} failed: {error:#}", disk.id);
-                }
-            }
-        })
-        .await;
-    log::info!("disk {}: prefetch of {total} chunks done", disk.id);
 }

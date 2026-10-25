@@ -28,9 +28,14 @@ impl Daemon {
         let mut paused = 0;
         for (disk_id, attached) in disks.iter() {
             let Some(device) = &attached.device else { continue };
-            match tokio::time::timeout(LAST_CHECKPOINT_LIMIT, attached.disk.checkpoint()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => log::warn!("disk {disk_id}: last checkpoint failed: {error:#}"),
+            // A task of its own: the timeout stops the wait, never the
+            // checkpoint, which could otherwise stop in the middle of a freeze.
+            let disk = attached.disk.clone();
+            let checkpoint = tokio::spawn(async move { disk.checkpoint().await });
+            match tokio::time::timeout(LAST_CHECKPOINT_LIMIT, checkpoint).await {
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(error))) => log::warn!("disk {disk_id}: last checkpoint failed: {error:#}"),
+                Ok(Err(error)) => log::warn!("disk {disk_id}: last checkpoint stopped: {error}"),
                 Err(_) => log::warn!("disk {disk_id}: last checkpoint took too long; local data stays on the SSD"),
             }
             device.hand_over();
@@ -91,7 +96,9 @@ impl Daemon {
         let device = tokio::task::spawn_blocking(move || UblkDevice::recover(device_disk, runtime, id)).await??;
         log::info!("disk {}: took over {} from the last run", folder.disk_id, device.path);
         let mut disks = self.disks.lock().await;
-        self.activate(&mut disks, folder, disk, device)?;
+        // The guest runs on; no startup profile, but read-ahead and fill as configured.
+        let prefetch = crate::daemon::Prefetch { chunks: Some(0), ..Default::default() };
+        self.activate(&mut disks, folder, disk, device, prefetch)?;
         Ok(())
     }
 }

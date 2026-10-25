@@ -1,5 +1,4 @@
 use crate::local_io::{LocalRead, LocalWrite};
-use anyhow::anyhow;
 use io_uring::{opcode, types};
 use libublk::UblkUringData;
 use libublk::uring_async::ublk_submit_sqe_async;
@@ -7,16 +6,17 @@ use std::os::fd::AsRawFd;
 
 /// Serves a local read on the ublk queue thread: io_uring reads straight into
 /// the request buffer. No tokio task, no thread pool, no copy.
-pub async fn read_local(plan: LocalRead, buffer: &mut [u8]) -> i32 {
+pub async fn read_local(plan: LocalRead<'_>, buffer: &mut [u8]) -> i32 {
     let base = buffer.as_mut_ptr();
     let mut reads = Vec::new();
-    for (part, file) in &plan.parts {
+    for (part, source) in &plan.parts {
         let len = part.buffer.len();
         // The parts cover separate ranges of the buffer.
         let target = unsafe { base.add(part.buffer.start) };
-        match file {
-            Some(file) => {
-                let read = opcode::Read::new(types::Fd(file.as_raw_fd()), target, len as u32).offset(part.offset);
+        match source {
+            Some((file, start)) => {
+                let read =
+                    opcode::Read::new(types::Fd(file.as_raw_fd()), target, len as u32).offset(start + part.offset);
                 reads.push(complete(read.build(), len));
             }
             None => unsafe { std::ptr::write_bytes(target, 0, len) },
@@ -31,30 +31,22 @@ pub async fn read_local(plan: LocalRead, buffer: &mut [u8]) -> i32 {
     }
 }
 
-/// Does a local write on the ublk queue thread. A durable (FUA) write also
-/// syncs the chunk files it wrote, through the same ring.
-pub async fn write_local(plan: LocalWrite<'_>, buffer: &[u8], durable: bool) -> i32 {
+/// Does a local write on the ublk queue thread.
+pub async fn write_local(plan: LocalWrite<'_>, buffer: &[u8]) -> i32 {
     let base = buffer.as_ptr();
     let writes = plan.parts.iter().map(|part| {
         let len = part.part.buffer.len();
         let source = unsafe { base.add(part.part.buffer.start) };
-        let write = opcode::Write::new(types::Fd(part.file.as_raw_fd()), source, len as u32).offset(part.part.offset);
+        let write = opcode::Write::new(types::Fd(part.file.as_raw_fd()), source, len as u32).offset(part.offset);
         complete(write.build(), len)
     });
     if !futures::future::join_all(writes).await.iter().all(|ok| *ok) {
         return -libc::EIO;
     }
-    if durable {
-        let syncs = plan.parts.iter().map(|part| {
-            let sync = opcode::Fsync::new(types::Fd(part.file.as_raw_fd())).flags(types::FsyncFlags::DATASYNC);
-            complete(sync.build(), 0)
-        });
-        if !futures::future::join_all(syncs).await.iter().all(|ok| *ok) {
-            plan.disk().fail_sync(&anyhow!("fdatasync of a FUA write failed"));
-            return -libc::EIO;
-        }
+    if let Err(error) = plan.finish() {
+        log::error!("local write could not be listed: {error:#}");
+        return -libc::EIO;
     }
-    plan.finish();
     buffer.len() as i32
 }
 

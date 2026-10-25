@@ -23,10 +23,23 @@ pub async fn owner_of(bucket: &Bucket, disk_id: &str, node: &NodeIdentity) -> Re
     })
 }
 
-/// Writes our marker. Without `force`, it fails when another node owns the disk.
-pub async fn claim(bucket: &Bucket, disk_id: &str, node: &NodeIdentity, force: bool) -> Result<()> {
+/// Writes our marker. Without `force`, it fails when another node owns the
+/// disk. Runs `work` as soon as our marker is written: during
+/// the settle wait, if there is one. `work` must not change S3 or local
+/// state, because its result is dropped when the claim fails.
+pub async fn claim_then<T>(
+    bucket: &Bucket,
+    disk_id: &str,
+    node: &NodeIdentity,
+    force: bool,
+    work: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    if bucket.conditional_writes() && !force {
+        claim_atomic(bucket, disk_id, node).await?;
+        return work.await;
+    }
     match owner_of(bucket, disk_id, node).await? {
-        Owner::ThisNode => return Ok(()),
+        Owner::ThisNode => return work.await,
         Owner::OtherNode(marker) if !force => bail!(
             "disk {disk_id} is attached on {} (node id {}) since {}. Use --force only when that node is down",
             marker.node,
@@ -40,12 +53,35 @@ pub async fn claim(bucket: &Bucket, disk_id: &str, node: &NodeIdentity, force: b
     // Without conditional writes two claims can land at the same moment,
     // and the last write wins. Each claimer waits, then reads back; the
     // one that finds another claim ID backs off.
-    tokio::time::sleep(CLAIM_SETTLE).await;
+    let (_, result) = tokio::join!(tokio::time::sleep(CLAIM_SETTLE), work);
     match AttachedMarker::load(bucket, disk_id).await? {
-        Some(marker) if marker.claim_id == ours.claim_id => Ok(()),
+        Some(marker) if marker.claim_id == ours.claim_id => result,
         Some(marker) => bail!("disk {disk_id} was attached on {} at the same moment. Try again later", marker.node),
         None => bail!("the attached marker of disk {disk_id} vanished during the attach. Try again"),
     }
+}
+
+/// One atomic create: of two nodes that claim at the same moment, exactly
+/// one gets the marker, so no settle wait is needed. A marker that is already
+/// there is ours (after a crash) or another node's.
+async fn claim_atomic(bucket: &Bucket, disk_id: &str, node: &NodeIdentity) -> Result<()> {
+    for _ in 0..3 {
+        if AttachedMarker::for_node(node).create(bucket, disk_id).await? {
+            return Ok(());
+        }
+        match owner_of(bucket, disk_id, node).await? {
+            Owner::ThisNode => return Ok(()),
+            Owner::OtherNode(marker) => bail!(
+                "disk {disk_id} is attached on {} (node id {}) since {}. Use --force only when that node is down",
+                marker.node,
+                marker.node_id,
+                marker.since
+            ),
+            // Released between the create and the read. Try again.
+            Owner::Nobody => {}
+        }
+    }
+    bail!("the attached marker of disk {disk_id} keeps changing. Try again later")
 }
 
 /// Checks the marker once a minute, also for an idle disk, which makes no

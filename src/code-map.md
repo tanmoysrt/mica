@@ -9,7 +9,7 @@ This page tells you where each part of mica is. Read [docs/architecture.md](../d
 3. **`api.rs`** is the Unix socket protocol. It receives a request and calls the daemon.
 4. **`daemon.rs`** owns the attached disks. It attaches, detaches, and finishes work left from a crash.
 5. **`disk.rs`** is the disk engine: read, write, discard and flush. This is the most important file.
-6. **`checkpoint.rs`** uploads dirty chunks and commits a new manifest.
+6. **`checkpoint.rs`** uploads unsaved chunks and commits a new root.
 7. **`ublk_device.rs`** connects the kernel block device to the disk engine.
 
 Then read the helper files in the table below when you need them.
@@ -38,21 +38,24 @@ Then read the helper files in the table below when you need them.
 
 | File | What it holds |
 |---|---|
-| `disk.rs` | `Disk` and `ChunkSlot`. Splits block I/O into chunk parts. Makes `<index>.chunk` files on first write. Waits when local space is full. |
-| `checkpoint.rs` | `Disk::checkpoint`: freeze, upload, save manifest, check owner, write head, clean up. |
-| `read_profile.rs` | Records the first reads of a session. Prefetches the chunks of the last profile at attach. |
-| `dirty_folder.rs` | Files of one disk that S3 does not have yet: `.chunk`, `.frozen`, `.tmp`. Crash recovery of these files. |
-| `chunk_cache.rs` | Clean chunks shared by all disks on the node. Downloads from S3, checks the hash, evicts old chunks, prunes unused ones. |
+| `disk.rs` | `Disk` and `ChunkSlot`. Loads the slots of a page on first use. Splits block I/O into chunk parts. Makes a chunk local on first write. FLUSH, read passes, held copies, and the freeing of saved chunks. Feeds read-ahead. Waits when unsaved data is at its limit. |
+| `checkpoint.rs` | `Disk::checkpoint`: stage and upload each unsaved chunk, release uploads that a GC check proves safe, save changed pages and the root, check owner, write head, repair after a GC, finish. |
+| `prefetch.rs` | Read-ahead for sequential reads, the startup prefetch from the read profile, and the background fill. |
+| `read_profile.rs` | Records the first reads of a session (up to 64 MiB of chunks). |
+| `local_data.rs` | `LocalData`: the data files, the hold file, and the dirty log (`DirtyLog`) with the `recent` bitmap in /run (`RecentMap`). Punches out unlisted ranges at open. |
+| `chunk_cache.rs` | Clean chunks shared by all disks on the node. Downloads from S3 in three classes (reads, likely reads, fill), decompresses and checks the hash, checks files found at start, evicts old chunks, prunes unused ones. |
 
 ### S3 objects
 
 | File | What it holds |
 |---|---|
 | `bucket.rs` | `Bucket`: get, put, delete, exists. `keys` gives the key of each object type. |
-| `manifest.rs` | Binary manifest format: encode, decode, load, save, grow. `CHUNK_SIZE`. |
+| `manifest.rs` | Binary formats of the root (`Manifest`) and of a `Page`: encode, decode, load, save, grow. Chunk size limits. |
+| `page_store.rs` | `PageStore`: verified pages of all disks, in memory, in local files and in S3. |
+| `codec.rs` | zstd compression of chunk and page objects. |
 | `records.rs` | JSON records: `Head`, `AttachedMarker`, `Snapshot`. |
 | `catalog.rs` | Operations that only touch S3: create, clone, snapshot, resize, delete, list, load a disk. |
-| `gc.rs` | `GarbageCollector`: finds the live manifests and chunks, and deletes old objects that are not live. |
+| `gc.rs` | `GarbageCollector`: finds the live roots, pages and chunks, and deletes old objects that are not live. `GcActivity`: what a checkpoint sees of GC. |
 | `ownership.rs` | The `attached` marker: find the owner, claim with a read-back, release, and the watcher that checks it every minute. |
 | `content_hash.rs` | `ContentHash` (SHA-256), hex and `sha256:` forms, zero check. |
 
@@ -72,27 +75,27 @@ Then read the helper files in the table below when you need them.
 
 ### A guest write
 
-`ublk_device.rs` `handle_request` → `Disk::write` → `Disk::write_part` → `Disk::working_file` makes `<index>.chunk` if needed (`dirty_folder.rs` `create_working`) → the data goes into the file.
+`ublk_device.rs` `handle_request` → `Disk::write` → `Disk::write_part`: `make_local` copies the base from the cache if needed, `hold_if_staged` keeps a copy for the running checkpoint, the data goes into the data file, and `finish_write` marks the data file and lists the chunk (`DirtyLog::note_write`).
 
 ### A guest read
 
-`Disk::read` → `Disk::readable_file` picks `.chunk`, then `.frozen`, then the base chunk from `chunk_cache.rs` (which gets it from S3 when needed). A chunk with no content is zeros.
+`Disk::read` reads local chunks from the data files under a read pass, then the others from `chunk_cache.rs` (which gets them from S3 when needed). A chunk with no content is zeros.
 
 ### A guest flush
 
-`Disk::flush` syncs the changed `.chunk` files and the dirty folder. It never touches S3.
+`Disk::flush` syncs the data files written since the last FLUSH, then appends the newly local chunks to the dirty log and syncs it. It never touches S3.
 
 ### A checkpoint
 
-`daemon.rs` `run_checkpoints` starts it every 3 minutes, or when local space runs low. Then `checkpoint.rs`: `freeze_all` → `upload_all` → `Manifest::save` → `confirm_ownership` → `Head::save` → `clean_up_frozen`.
+`daemon.rs` `run_checkpoints` starts it every 30 s, at 512 MiB of unsaved data, or when local space runs low. Then `checkpoint.rs`: `GcActivity::read` → `stage_and_upload` (`stage` and `upload` for each chunk, `release_safe` once a second) → `commit_root` (pages, then root) → `confirm_ownership` → `Head::save` → `GcActivity::finished` → repair if a GC ran → `finish` (saved chunks, `unstage`, `free_saved_chunks`).
 
 ### Attach
 
-`Daemon::attach` → `ownership::claim` → `Catalog::load` (head and manifest) → `Disk::open` (adds chunks left by a crash) → `UblkDevice::start` → checkpoint loop and prefetch start.
+`Daemon::attach` → `ownership::claim_then` (claim, and `Catalog::load` of head and root) → `Disk::open` (adds chunks left by a crash, with their pages) → `UblkDevice::start` → checkpoint loop, marker watcher and `prefetch::run` start.
 
 ### Detach
 
-`Daemon::detach` checks that the device is not in use, then stops it. `Daemon::drain` then runs checkpoints until one succeeds. It deletes the local chunks, releases the marker, and deletes the disk folder.
+`Daemon::detach` checks that the device is not in use, then stops it. `Daemon::drain` then runs checkpoints until one succeeds. It copies the local chunks into the cache, deletes the local data, releases the marker, and deletes the disk folder.
 
 ### Daemon restart
 
@@ -116,7 +119,7 @@ The CLI sends a `Mount` request. The daemon (`managed_mount::mount_with_unit`) c
 
 ## Concurrency rules
 
-- Each chunk has its own async lock (`ChunkSlot` in `disk.rs`). A write holds it until the data is in the file. Thus a checkpoint cannot freeze a file while a write goes into it.
+- Each chunk has its own async lock (`ChunkSlot` in `disk.rs`). A write holds it until the data is in the file. Thus a checkpoint cannot read a chunk while a write goes into it.
 - Only one checkpoint runs at a time (`checkpoint_running`).
 - File I/O runs on the blocking pool (`blocking.rs`).
 - ublk queue threads run a smol executor. A request that only needs local data is served on the queue thread with io_uring (`local_io.rs`, `queue_io.rs`). Other requests go to tokio in `on_tokio` in `ublk_device.rs`.

@@ -1,6 +1,6 @@
 use crate::bucket::{Bucket, ObjectInfo, keys};
 use crate::content_hash::ContentHash;
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, Page};
 use crate::records::{AttachedMarker, Head, Snapshot, now_text};
 use anyhow::{Context, Result, bail};
 use futures::{StreamExt, TryStreamExt};
@@ -9,6 +9,9 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 const DELETE_PARALLELISM: usize = 16;
+/// A checkpoint waits this long for a running GC to end before it checks its chunks.
+const GC_WAIT: Duration = Duration::from_secs(600);
+const GC_POLL: Duration = Duration::from_secs(2);
 /// A grace shorter than this could delete chunks that a running checkpoint
 /// is about to commit, so it is only allowed while no disk is attached.
 const SAFE_GRACE: Duration = Duration::from_secs(3600);
@@ -29,12 +32,66 @@ pub struct GcReport {
     pub disks: usize,
     pub snapshots: usize,
     pub kept_manifests: usize,
+    pub kept_pages: usize,
     pub kept_chunks: usize,
     pub garbage_chunks: usize,
     pub garbage_chunk_bytes: u64,
+    pub garbage_pages: usize,
+    pub garbage_page_bytes: u64,
     pub garbage_manifests: usize,
     pub garbage_manifest_bytes: u64,
     pub deleted: bool,
+}
+
+/// `gc/last`: written at the end of each GC that deleted, before its lock goes.
+#[derive(Serialize, Deserialize)]
+struct GcLastRun {
+    run: String,
+    node: String,
+    finished: String,
+}
+
+/// What a checkpoint sees of GC: a running GC (its lock), and the last
+/// finished one. A GC can delete a chunk that a checkpoint uploads only if
+/// it runs during the checkpoint. Then the lock is there at the end, or the
+/// last run changed.
+#[derive(Debug, PartialEq)]
+pub struct GcActivity {
+    running: bool,
+    last_run: Option<String>,
+}
+
+impl GcActivity {
+    /// The lock first, then the last run, never at the same time: a GC
+    /// writes its last run before it deletes its lock. So a GC that ended
+    /// between the two reads shows up in the last run.
+    pub async fn read(bucket: &Bucket) -> Result<Self> {
+        let running = bucket.exists(&keys::gc_lock()).await?;
+        let last = bucket.get(&keys::gc_last()).await?;
+        let last_run = last.and_then(|data| serde_json::from_slice::<GcLastRun>(&data).ok()).map(|last| last.run);
+        Ok(Self { running, last_run })
+    }
+
+    /// Like `read`, but waits for a running GC to end first, up to a limit.
+    /// A GC that runs longer gets the check while it runs, as in v0.1.
+    pub async fn finished(bucket: &Bucket) -> Result<Self> {
+        let started = std::time::Instant::now();
+        loop {
+            let activity = Self::read(bucket).await?;
+            if !activity.running || started.elapsed() > GC_WAIT {
+                return Ok(activity);
+            }
+            tokio::time::sleep(GC_POLL).await;
+        }
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.running
+    }
+
+    pub fn may_have_deleted_since(&self, before: &GcActivity) -> bool {
+        self.running || self.last_run != before.last_run
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -43,10 +100,11 @@ struct GcLock {
     since: String,
 }
 
-/// The manifests and chunks that must stay.
+/// The roots, pages and chunks that must stay.
 #[derive(Default)]
 struct LiveSet {
     manifests: HashSet<ContentHash>,
+    pages: HashSet<ContentHash>,
     chunks: HashSet<ContentHash>,
 }
 
@@ -58,7 +116,14 @@ impl GarbageCollector<'_> {
         }
         let result = self.collect(delete).await;
         if delete {
-            let _ = self.bucket.delete(&keys::gc_lock()).await;
+            // Checkpoints that ran meanwhile see the new run and check their chunks.
+            let last = GcLastRun { run: random_id(), node: self.node_name.to_string(), finished: now_text() };
+            let written = self.bucket.put(&keys::gc_last(), serde_json::to_vec(&last)?.into()).await;
+            // Without the record, keep the lock: a checkpoint then still checks.
+            if written.is_ok() {
+                let _ = self.bucket.delete(&keys::gc_lock()).await;
+            }
+            written?;
         }
         result
     }
@@ -67,15 +132,21 @@ impl GarbageCollector<'_> {
         let mut report = GcReport::default();
         let live = self.find_live(&mut report).await?;
         let garbage_manifests = self.find_garbage("manifests", &live.manifests).await?;
+        let garbage_pages = self.find_garbage("pages", &live.pages).await?;
         let garbage_chunks = self.find_garbage("chunks", &live.chunks).await?;
         report.kept_manifests = live.manifests.len();
+        report.kept_pages = live.pages.len();
         report.kept_chunks = live.chunks.len();
         report.garbage_manifests = garbage_manifests.len();
         report.garbage_manifest_bytes = garbage_manifests.iter().map(|object| object.size).sum();
+        report.garbage_pages = garbage_pages.len();
+        report.garbage_page_bytes = garbage_pages.iter().map(|object| object.size).sum();
         report.garbage_chunks = garbage_chunks.len();
         report.garbage_chunk_bytes = garbage_chunks.iter().map(|object| object.size).sum();
         if delete {
+            // Chunks first, roots last: a root never points to a deleted page.
             self.delete_all(garbage_chunks).await?;
+            self.delete_all(garbage_pages).await?;
             self.delete_all(garbage_manifests).await?;
             report.deleted = true;
         }
@@ -141,7 +212,17 @@ impl GarbageCollector<'_> {
             return Ok(None);
         }
         let manifest = Manifest::load(self.bucket, &hash).await?;
-        live.chunks.extend(manifest.chunks.iter().flatten().copied());
+        // Checkpoints share most pages, so each page is read only once.
+        let new_pages: Vec<ContentHash> =
+            manifest.pages.iter().flatten().copied().filter(|page| live.pages.insert(*page)).collect();
+        let pages: Vec<Page> = futures::stream::iter(new_pages)
+            .map(|page| async move { Page::load(self.bucket, &page).await })
+            .buffer_unordered(DELETE_PARALLELISM)
+            .try_collect()
+            .await?;
+        for page in pages {
+            live.chunks.extend(page.chunks.iter().flatten().copied());
+        }
         Ok(manifest.parent)
     }
 
@@ -160,8 +241,10 @@ impl GarbageCollector<'_> {
 
     /// Checks each object's age again just before deleting it. A checkpoint
     /// may have written it again since the listing.
+    /// Every delete runs to its end before this returns, also after one
+    /// fails: `gc/last` must come after the last delete.
     async fn delete_all(&self, garbage: Vec<ObjectInfo>) -> Result<()> {
-        futures::stream::iter(garbage)
+        let results: Vec<Result<()>> = futures::stream::iter(garbage)
             .map(|object| async move {
                 match self.bucket.info(&object.key).await? {
                     Some(current) if current.age_secs > self.grace.as_secs() => self.bucket.delete(&object.key).await,
@@ -169,29 +252,54 @@ impl GarbageCollector<'_> {
                 }
             })
             .buffer_unordered(DELETE_PARALLELISM)
-            .try_collect::<Vec<()>>()
-            .await?;
-        Ok(())
+            .collect()
+            .await;
+        results.into_iter().collect()
     }
 
-    /// Without conditional writes this lock is not atomic. It only stops
-    /// needless work: two GCs at once are still safe, as each deletes only garbage.
+    /// With conditional writes, only one GC can create the lock, so a
+    /// checkpoint that sees no lock knows that no GC runs. Without them the
+    /// lock is not atomic: two GCs at once still delete only garbage, but
+    /// the first to end deletes the lock while the other may still delete.
     async fn take_lock(&self) -> Result<()> {
-        if let Some(object) = self.bucket.info(&keys::gc_lock()).await?
-            && object.age_secs < STALE_LOCK.as_secs()
-        {
-            let lock: Option<GcLock> =
-                self.bucket.get(&keys::gc_lock()).await?.and_then(|data| serde_json::from_slice(&data).ok());
-            let holder = lock.map(|lock| format!("{} since {}", lock.node, lock.since)).unwrap_or_default();
-            bail!("another GC is running ({holder}). Try again later");
-        }
+        let stale = match self.bucket.info(&keys::gc_lock()).await? {
+            Some(object) if object.age_secs < STALE_LOCK.as_secs() => {
+                let lock: Option<GcLock> =
+                    self.bucket.get(&keys::gc_lock()).await?.and_then(|data| serde_json::from_slice(&data).ok());
+                let holder = lock.map(|lock| format!("{} since {}", lock.node, lock.since)).unwrap_or_default();
+                bail!("another GC is running ({holder}). Try again later");
+            }
+            Some(_) => true,
+            None => false,
+        };
         let lock = GcLock { node: self.node_name.to_string(), since: now_text() };
-        self.bucket.put(&keys::gc_lock(), serde_json::to_vec(&lock)?.into()).await
+        let data: bytes::Bytes = serde_json::to_vec(&lock)?.into();
+        if !self.bucket.conditional_writes() {
+            return self.bucket.put(&keys::gc_lock(), data).await;
+        }
+        // Two GCs that both take over a stale lock could delete each other's
+        // new lock. Only an operator knows that no GC runs.
+        if stale {
+            bail!(
+                "a GC lock older than {} hours exists, from a GC that likely died. If no GC runs, delete {} and try again",
+                STALE_LOCK.as_secs() / 3600,
+                self.bucket.full_key(&keys::gc_lock())
+            );
+        }
+        // Of GCs that start at the same moment, one wins the create.
+        if !self.bucket.put_if_absent(&keys::gc_lock(), data).await? {
+            bail!("another GC just started. Try again later");
+        }
+        Ok(())
     }
 }
 
-/// `chunks/ab/<hex>` and `manifests/<hex>` end with the hash. Other keys are
-/// not mica objects and are never deleted.
+/// `chunks/ab/<hex>`, `pages/ab/<hex>` and `manifests/<hex>` end with the
+/// hash. Other keys are not mica objects and are never deleted.
 fn hash_of(key: &str) -> Option<ContentHash> {
     ContentHash::from_hex(key.rsplit('/').next()?).ok()
+}
+
+fn random_id() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/random/uuid").unwrap_or_default().trim().to_string()
 }

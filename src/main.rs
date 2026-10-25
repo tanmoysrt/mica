@@ -4,12 +4,13 @@ mod bucket;
 mod catalog;
 mod checkpoint;
 mod chunk_cache;
+mod codec;
 mod commands;
 mod config;
 mod content_hash;
 mod daemon;
 mod daemon_recovery;
-mod dirty_folder;
+mod local_data;
 mod disk_commands;
 mod gc;
 mod disk;
@@ -19,6 +20,8 @@ mod managed_mount;
 mod manifest;
 mod mount_tools;
 mod node;
+mod page_store;
+mod prefetch;
 mod output;
 mod ownership;
 mod queue_io;
@@ -94,8 +97,8 @@ fn limit_allocator_caching() {
     }
 }
 
-/// mica keeps one open file per dirty chunk. The default limit of 1024 is
-/// too low for a large write burst.
+/// mica keeps one data file open per GiB of each attached disk, and cache
+/// files of hot chunks. The default limit of 1024 is too low for large disks.
 fn raise_open_file_limit() {
     let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
     unsafe {

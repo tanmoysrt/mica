@@ -137,14 +137,14 @@ fn ask_secret(current: &str) -> Result<String> {
     }
 }
 
-/// Cache and dirty chunks must share one filesystem: a checkpoint renames
-/// files from one to the other. Reflinks make chunk copies free.
+/// The cache and the data files share one filesystem: chunks move between
+/// them with copy_file_range, which is a reflink where the filesystem can.
 fn prepare_data_dir(data_dir: &Path) -> Result<()> {
-    std::fs::create_dir_all(data_dir).with_context(|| format!("create {}", data_dir.display()))?;
+    crate::local_data::create_dir_durable(data_dir)?;
     if supports_reflink(data_dir) {
         println!("  ok  {} supports reflink copies", data_dir.display());
     } else {
-        println!("  warn  {} has no reflink copies (use XFS or btrfs); chunk copies cost real I/O", data_dir.display());
+        println!("  ok  {} has no reflink copies: chunk copies cost real I/O (XFS and btrfs make them free)", data_dir.display());
     }
     Ok(())
 }

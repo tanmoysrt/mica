@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use object_store::aws::AmazonS3Builder;
 use object_store::path::Path;
-use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
+use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload};
 use serde::Serialize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,11 +16,12 @@ pub struct ObjectInfo {
     pub age_secs: u64,
 }
 
-/// The S3 bucket. mica only needs get, put, delete and exists.
-/// No conditional writes, so it works the same on R2, Ceph and Garage.
+/// The S3 bucket. mica only needs get, put, delete and exists. Conditional
+/// writes are optional: without them it works the same on R2, Ceph and Garage.
 pub struct Bucket {
     store: Arc<dyn ObjectStore>,
     prefix: String,
+    conditional_writes: bool,
     requests: RequestCounters,
 }
 
@@ -62,6 +63,7 @@ impl Bucket {
         Ok(Self {
             store: Arc::new(store),
             prefix: config.prefix.trim_matches('/').to_string(),
+            conditional_writes: config.conditional_writes,
             requests: RequestCounters::default(),
         })
     }
@@ -101,6 +103,23 @@ impl Bucket {
             .await
             .with_context(|| format!("put {key}"))?;
         Ok(())
+    }
+
+    pub fn conditional_writes(&self) -> bool {
+        self.conditional_writes
+    }
+
+    /// Writes the object only if no object has the key. Returns false when
+    /// one exists. Needs `conditional_writes`.
+    pub async fn put_if_absent(&self, key: &str, data: Bytes) -> Result<bool> {
+        count(&self.requests.put, 1);
+        count(&self.requests.bytes_out, data.len() as u64);
+        let options = PutOptions { mode: PutMode::Create, ..PutOptions::default() };
+        match self.store.put_opts(&self.path(key), PutPayload::from(data), options).await {
+            Ok(_) => Ok(true),
+            Err(object_store::Error::AlreadyExists { .. } | object_store::Error::Precondition { .. }) => Ok(false),
+            Err(error) => Err(error).with_context(|| format!("put {key} if absent")),
+        }
     }
 
     pub async fn delete(&self, key: &str) -> Result<()> {
@@ -191,6 +210,11 @@ impl Bucket {
         }
     }
 
+    /// The key with the bucket prefix, as an operator sees it in the store.
+    pub fn full_key(&self, key: &str) -> String {
+        self.path(key).to_string()
+    }
+
     fn path(&self, key: &str) -> Path {
         if self.prefix.is_empty() {
             Path::from(key)
@@ -217,6 +241,11 @@ pub mod keys {
         format!("chunks/{}/{hex}", &hex[..2])
     }
 
+    pub fn page(hash: &ContentHash) -> String {
+        let hex = hash.to_hex();
+        format!("pages/{}/{hex}", &hex[..2])
+    }
+
     pub fn manifest(hash: &ContentHash) -> String {
         format!("manifests/{}", hash.to_hex())
     }
@@ -235,5 +264,9 @@ pub mod keys {
 
     pub fn gc_lock() -> String {
         "gc/lock".to_string()
+    }
+
+    pub fn gc_last() -> String {
+        "gc/last".to_string()
     }
 }

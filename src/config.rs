@@ -14,6 +14,9 @@ pub struct Config {
     pub cache_limit_gib: u64,
     pub dirty_limit_gib: u64,
     pub checkpoint_interval_secs: u64,
+    /// A checkpoint also starts when this much local data is not in S3, so
+    /// uploads run while the guest writes, and a detach has little left to do.
+    pub checkpoint_after_mib: u64,
     /// A disk is "behind" when data that is not in S3 is older than this.
     pub max_unsaved_minutes: u64,
     /// When behind, guest writes wait until uploads catch up. That makes
@@ -26,6 +29,11 @@ pub struct Config {
     /// GC never deletes an object written in the last hours. A running
     /// checkpoint may not have committed its new chunks yet.
     pub gc_grace_hours: u64,
+    /// At attach, download the chunks that the disk read first last time.
+    pub prefetch_on_attach: bool,
+    /// After that, download every other chunk of the disk in the background,
+    /// behind all reads, until the cache is nearly full.
+    pub background_fill: bool,
     /// `MemoryHigh=` of mica.service, such as "2G". Empty means no limit:
     /// the kernel frees mica's page cache anyway when other programs need memory.
     pub memory_high: String,
@@ -42,6 +50,9 @@ pub struct S3Config {
     pub region: String,
     /// Optional key prefix, so that one bucket can hold many mica setups.
     pub prefix: String,
+    /// The store honors `If-None-Match: *` on PUT (R2, S3, MinIO, RustFS; not
+    /// Garage). A claim is then one atomic create, without the settle wait.
+    pub conditional_writes: bool,
 }
 
 impl Default for Config {
@@ -51,12 +62,15 @@ impl Default for Config {
             data_dir: PathBuf::from("/var/lib/mica"),
             cache_limit_gib: 50,
             dirty_limit_gib: 20,
-            checkpoint_interval_secs: 180,
+            checkpoint_interval_secs: 30,
+            checkpoint_after_mib: 512,
             max_unsaved_minutes: 5,
             wait_when_behind: false,
             mount_roots: ["/mnt", "/srv", "/media"].into_iter().map(PathBuf::from).collect(),
             gc_keep_checkpoints: 5,
             gc_grace_hours: 24,
+            prefetch_on_attach: true,
+            background_fill: true,
             memory_high: String::new(),
             s3: S3Config { region: "auto".to_string(), ..S3Config::default() },
         }

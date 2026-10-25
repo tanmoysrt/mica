@@ -108,32 +108,40 @@ pub fn print_gc_preview(preview: &Value) {
     let report = &preview["report"];
     let number = |key: &str| report[key].as_u64().unwrap_or(0);
     println!(
-        "Kept: {} disks, {} snapshots, {} manifests, {} chunks",
+        "Kept: {} disks, {} snapshots, {} manifests, {} pages, {} chunks",
         number("disks"),
         number("snapshots"),
         number("kept_manifests"),
+        number("kept_pages"),
         number("kept_chunks")
     );
-    if number("garbage_chunks") == 0 && number("garbage_manifests") == 0 {
+    if gc_found_nothing(report) {
         println!("Nothing to delete. Objects written in the last {} are kept.", preview["grace"].as_str().unwrap_or("?"));
         return;
     }
     println!(
-        "Garbage: {} chunks ({}) and {} manifests ({})",
+        "Garbage: {} chunks ({}), {} pages ({}) and {} manifests ({})",
         number("garbage_chunks"),
         bytes(number("garbage_chunk_bytes")),
+        number("garbage_pages"),
+        bytes(number("garbage_page_bytes")),
         number("garbage_manifests"),
         bytes(number("garbage_manifest_bytes"))
     );
 }
 
+pub fn gc_found_nothing(report: &Value) -> bool {
+    ["garbage_chunks", "garbage_pages", "garbage_manifests"].iter().all(|key| report[*key].as_u64().unwrap_or(0) == 0)
+}
+
 pub fn print_gc_result(report: &Value) {
     let number = |key: &str| report[key].as_u64().unwrap_or(0);
     println!(
-        "Deleted {} chunks and {} manifests, and freed {}",
+        "Deleted {} chunks, {} pages and {} manifests, and freed {}",
         number("garbage_chunks"),
+        number("garbage_pages"),
         number("garbage_manifests"),
-        bytes(number("garbage_chunk_bytes") + number("garbage_manifest_bytes"))
+        bytes(number("garbage_chunk_bytes") + number("garbage_page_bytes") + number("garbage_manifest_bytes"))
     );
 }
 

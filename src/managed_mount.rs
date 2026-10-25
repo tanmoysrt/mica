@@ -228,7 +228,7 @@ pub async fn unit_stop(socket: &Path, disk: &str) -> Result<()> {
 
 /// Attaches, formats a disk that was never written, and mounts it.
 async fn mount_now(socket: &Path, disk: &str, path: &Path, filesystem: &str, force: bool) -> Result<Value> {
-    let request = Request::Attach { disk: disk.to_string(), force, prefetch: None, prefetch_parallel: None };
+    let request = Request::Attach { disk: disk.to_string(), force, prefetch: None, prefetch_parallel: None, fill: None };
     let attached = send(socket, &request).await?;
     let device = attached["device"].as_str().ok_or_else(|| anyhow!("daemon gave no device"))?.to_string();
     if mount_tools::device_mounted_at(path).ok().flatten().is_some() {

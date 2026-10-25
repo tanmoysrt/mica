@@ -2,7 +2,7 @@
 
 ```text
 mica status                          Show attached disks
-mica disk      ls | create | attach | mount | unmount | detach | resize | delete
+mica disk      ls | create | attach | mount | unmount | detach | checkpoint | warm | resize | delete
 mica snapshot  ls | create | delete
 mica gc                              Delete data that no disk or snapshot needs
 mica cache     status | prune        Show and prune the local chunk cache
@@ -58,6 +58,7 @@ disk-2   20GiB   -               2 days ago
 
 ```bash
 mica disk create disk-1 --size 20G
+mica disk create disk-2 --size 100G --chunk-size 64K
 mica disk create sandbox-7 --from-snapshot base-image
 mica disk create sandbox-8 --from-snapshot base-image --size 40G
 ```
@@ -66,8 +67,11 @@ mica disk create sandbox-8 --from-snapshot base-image --size 40G
 |---|---|
 | `--size <SIZE>` | Size of an empty disk, or a larger size for a disk from a snapshot |
 | `--from-snapshot <SNAPSHOT>` | Start from this snapshot. No data is copied. |
+| `--chunk-size <SIZE>` | Chunk size of an empty disk: 64K, 128K, 256K, 512K, 1M, 2M or 4M. Default: 256K. A disk from a snapshot has the chunk size of the snapshot. |
 
 A disk is thin: it uses no space until it is written. Disk names use letters, digits, `-`, `_` and `.`.
+
+A small chunk size makes cold reads and small uploads cheaper. A large one needs fewer S3 requests. See [design.md](design.md#4-chunks).
 
 ### disk warm
 
@@ -94,8 +98,9 @@ mica disk attach disk-1
 
 | Option | Meaning |
 |---|---|
-| `--prefetch <CHUNKS>` | Download this many chunks (4 MiB) of the read profile in the background. Without it, there is no prefetch. |
+| `--prefetch <CHUNKS>` | Download only this many chunks of the read profile at attach. Default: the full profile (up to 64 MiB), when `prefetch_on_attach` is on. `0` turns it off for this attach. |
 | `--prefetch-parallel <N>` | Downloads at the same time for this disk's prefetch. Default: 8. |
+| `--no-fill` | Do not download the rest of the disk in the background for this attach. See `background_fill` in [operations.md](operations.md#configuration). |
 | `--force` | Take the disk from another node. Root only. Use it only when that node is down: see [reliability.md](reliability.md#fencing-without-conditional-writes). |
 
 Attaching a disk that is already attached here returns its device. Attaching a disk that is still uploading here waits for the upload.
@@ -135,6 +140,17 @@ Removes the device, uploads all local data, and releases the disk. It refuses wh
 ```bash
 mica disk detach disk-1
 ```
+
+### disk checkpoint
+
+Uploads the local changes of an attached disk now, and commits them. The disk stays attached. Use it before a snapshot by your controller, or to make sure S3 has the data of a busy disk.
+
+```text
+$ mica disk checkpoint disk-1
+Saved disk disk-1 in S3 (seq 42, 830 ms). Not in S3 now: 0B
+```
+
+"Not in S3 now" is the data that the guest wrote during the checkpoint.
 
 ### disk resize
 
@@ -190,15 +206,17 @@ Disks made from the snapshot keep working. `mica gc` frees its space later.
 
 ## gc
 
-Deletes chunks and manifests that no disk, snapshot or kept checkpoint needs. It counts first, then asks.
+Deletes chunks, pages and manifests (roots) that no disk, snapshot or kept checkpoint needs. It counts first, then asks.
 
 ```text
 $ mica gc
-Kept: 3 disks, 2 snapshots, 14 manifests, 4812 chunks
-Garbage: 167 chunks (668MiB) and 30 manifests (2.3MiB)
+Kept: 3 disks, 2 snapshots, 14 manifests, 61 pages, 52310 chunks
+Garbage: 2671 chunks (281MiB), 9 pages (102KiB) and 30 manifests (190KiB)
 Delete them? [y/N]
-Deleted 167 chunks and 30 manifests, and freed 670.3MiB
+Deleted 2671 chunks, 9 pages and 30 manifests, and freed 281.3MiB
 ```
+
+Sizes are the compressed sizes in S3.
 
 | Option | Meaning |
 |---|---|

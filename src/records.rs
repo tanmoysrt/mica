@@ -70,6 +70,11 @@ impl AttachedMarker {
     pub async fn save(&self, bucket: &Bucket, disk_id: &str) -> Result<()> {
         save_json(bucket, &keys::attached(disk_id), self).await
     }
+
+    /// Writes the marker only if the disk has none. False when it has one.
+    pub async fn create(&self, bucket: &Bucket, disk_id: &str) -> Result<bool> {
+        bucket.put_if_absent(&keys::attached(disk_id), serde_json::to_vec_pretty(self)?.into()).await
+    }
 }
 
 impl Snapshot {

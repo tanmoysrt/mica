@@ -20,10 +20,15 @@ const QUEUE_DEPTH: u16 = 64;
 /// One queue thread per CPU, up to this many. Parallel I/O then uses more
 /// than one CPU. A device taken over after a restart keeps its own count.
 const MAX_QUEUES: u16 = 4;
-/// Room in each queue's ring for the ublk commands and the file I/O that
-/// the queue thread does itself: up to two chunk parts per request, and a sync.
-const RING_DEPTH: u16 = QUEUE_DEPTH * 4;
 const IO_BUFFER_BYTES: u32 = 512 << 10;
+
+/// Room in each queue's ring for the ublk commands and the file I/O that
+/// the queue thread does itself: one read or write per chunk part (a request
+/// can span this many chunks), then one sync per part for a FUA write.
+fn ring_depth(chunk_size: u32) -> u16 {
+    let parts = IO_BUFFER_BYTES.div_ceil(chunk_size) + 1;
+    (QUEUE_DEPTH as u32 * (parts + 2)).min(4096) as u16
+}
 
 /// The `/dev/ublkbN` block device of one disk. ublk only turns kernel block
 /// requests into calls to `Disk`.
@@ -140,10 +145,11 @@ fn ensure_control_ring() -> Result<()> {
 
 /// A volatile write cache makes the kernel send FLUSH and FUA. Discard lets
 /// guests free chunks with fstrim.
+#[allow(clippy::cast_possible_truncation)]
 fn set_device_params(dev: &mut UblkDev, size: u64, chunk_size: u32) {
     dev.set_default_params(size);
-    dev.tgt.sq_depth = RING_DEPTH;
-    dev.tgt.cq_depth = RING_DEPTH;
+    dev.tgt.sq_depth = ring_depth(chunk_size);
+    dev.tgt.cq_depth = ring_depth(chunk_size);
     let params = &mut dev.tgt.params;
     params.basic.attrs = sys::UBLK_ATTR_VOLATILE_CACHE | sys::UBLK_ATTR_FUA;
     params.types |= sys::UBLK_PARAM_TYPE_DISCARD;
@@ -221,17 +227,21 @@ async fn handle_request(
     let len = (request.nr_sectors as usize) << 9;
     let op = request.op_flags & 0xff;
     let durable = request.op_flags & sys::UBLK_IO_F_FUA != 0;
-    // Local data is served on this thread. Anything that needs S3, a new
-    // chunk file, or a busy lock goes to tokio below.
+    // Local data is served on this thread. Anything that needs S3, a chunk
+    // that is not local yet, a FUA write, or a busy lock goes to tokio below.
     if op == sys::UBLK_IO_OP_READ
         && let Some(plan) = disk.plan_local_read(offset, len)
     {
         return queue_io::read_local(plan, &mut buffer[..len]).await;
     }
+    // A FUA write goes to the engine. Its sync must take the one FLUSH path:
+    // Linux reports a writeback error only once to each open file, so two
+    // syncs at the same time could otherwise hide a failure from each other.
     if op == sys::UBLK_IO_OP_WRITE
-        && let Some(plan) = disk.plan_local_write(offset, len, durable)
+        && !durable
+        && let Some(plan) = disk.plan_local_write(offset, len)
     {
-        return queue_io::write_local(plan, &buffer[..len], durable).await;
+        return queue_io::write_local(plan, &buffer[..len]).await;
     }
     let disk = disk.clone();
     let outcome = match op {

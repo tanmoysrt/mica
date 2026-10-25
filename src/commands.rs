@@ -107,7 +107,7 @@ async fn collect_garbage(socket: &Path, grace: Option<&str>, yes: bool) -> Resul
         let preview = send(socket, &Request::Gc { delete: false, grace_secs }).await?;
         output::print_gc_preview(&preview);
         let report = &preview["report"];
-        if report["garbage_chunks"] == 0 && report["garbage_manifests"] == 0 {
+        if output::gc_found_nothing(report) {
             return Ok(());
         }
         if !ask_before_delete("Delete them?", false)? {

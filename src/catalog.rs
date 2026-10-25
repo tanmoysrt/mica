@@ -38,16 +38,16 @@ impl<'a> Catalog<'a> {
         Self { bucket, node_name }
     }
 
-    pub async fn create(&self, disk_id: &str, size: u64) -> Result<()> {
+    pub async fn create(&self, disk_id: &str, size: u64, chunk_size: u64) -> Result<()> {
         validate_name(disk_id)?;
         ensure!(size > 0, "disk size must be more than zero");
         self.ensure_new_disk(disk_id).await?;
-        let manifest = Manifest::empty(disk_id, size);
+        let manifest = Manifest::empty(disk_id, size, chunk_size)?;
         let hash = manifest.save(self.bucket).await?;
         Head::new(&hash, Vec::new(), 0, self.node_name).save(self.bucket, disk_id).await
     }
 
-    /// A clone points to the manifest of the snapshot. It copies no chunks.
+    /// A clone points to the root of the snapshot. It copies no pages or chunks.
     pub async fn clone_snapshot(&self, snapshot: &str, disk_id: &str, size: Option<u64>) -> Result<()> {
         validate_name(disk_id)?;
         self.ensure_new_disk(disk_id).await?;

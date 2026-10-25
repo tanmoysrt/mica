@@ -57,12 +57,15 @@ socket = "/run/mica.sock"
 data_dir = "/var/lib/mica"
 cache_limit_gib = 50
 dirty_limit_gib = 20
-checkpoint_interval_secs = 180
+checkpoint_interval_secs = 30
+checkpoint_after_mib = 512
 max_unsaved_minutes = 5
 wait_when_behind = false
 mount_roots = ["/mnt", "/srv", "/media"]
 gc_keep_checkpoints = 5
 gc_grace_hours = 24
+prefetch_on_attach = true
+background_fill = true
 memory_high = ""
 
 [s3]
@@ -72,6 +75,7 @@ access_key_id = "..."
 secret_access_key = "..."
 region = "auto"
 prefix = ""
+conditional_writes = false
 ```
 
 | Setting | Default | Meaning |
@@ -80,18 +84,22 @@ prefix = ""
 | `data_dir` | `/var/lib/mica` | Local chunks, cache and state. Cache and dirty chunks must be on one filesystem. |
 | `cache_limit_gib` | 50 | Clean chunk cache, shared by all disks of the node |
 | `dirty_limit_gib` | 20 | Local data not yet in S3, **for each attached disk**. At half, a checkpoint starts early; at the limit, writes wait. |
-| `checkpoint_interval_secs` | 180 | Time between checkpoints of a busy disk. Keep it well below `max_unsaved_minutes`. |
+| `checkpoint_interval_secs` | 30 | Time between checkpoints of a busy disk. Keep it well below `max_unsaved_minutes`. |
+| `checkpoint_after_mib` | 512 | A checkpoint also starts when this much local data is not in S3. So uploads run while the guest writes, and a detach has little left to upload. |
 | `max_unsaved_minutes` | 5 | A disk is **behind** when data not in S3 is older than this |
 | `wait_when_behind` | false | When behind, guest writes wait until uploads catch up. The data-loss bound then always holds; on a slow link, writes are slow. |
 | `mount_roots` | `/mnt`, `/srv`, `/media` | `mica disk mount` only mounts below these folders |
 | `gc_keep_checkpoints` | 5 | Checkpoints of each disk that GC keeps as restore points |
 | `gc_grace_hours` | 24 | GC never deletes objects written in this time |
+| `prefetch_on_attach` | true | At attach, download the chunks of the read profile: what the disk read first in its last session, up to 64 MiB |
+| `background_fill` | true | After that, download every other chunk of the disk, behind all reads, until the cache is nearly full. `mica disk attach --no-fill` turns it off for one attach. |
 | `memory_high` | empty | `MemoryHigh=` of `mica.service`, such as `2G`. Empty means no limit. |
 | `s3.endpoint` | – | S3 endpoint URL |
 | `s3.bucket` | – | Bucket name |
 | `s3.access_key_id`, `s3.secret_access_key` | – | Credentials |
 | `s3.region` | `auto` | Region; `auto` works for R2 |
 | `s3.prefix` | empty | Key prefix, so that one bucket can hold many mica setups |
+| `s3.conditional_writes` | false | The store honors `If-None-Match: *` on PUT. Then a claim is one atomic create, and an attach takes about 25 ms, not 1 s. True for R2, AWS S3, MinIO and RustFS. Keep it false for Garage. |
 
 When you run `mica daemon` by hand during development, empty S3 fields come from the environment: `S3_ENDPOINT`, `BUCKET_NAME`, `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, `S3_REGION`, `S3_PREFIX`.
 
@@ -174,28 +182,23 @@ The chunks stay in the cache while any attached disk uses them. `mica cache prun
 
 ## Memory
 
-`systemctl status mica` counts the page cache of the chunk files against mica. That memory is free for any program that needs it. mica's own memory is small: about 15 MiB idle, and about 80 MiB during a large upload.
+`systemctl status mica` counts the page cache of the data files against mica. That memory is free for any program that needs it. mica's own memory is small: about 15 MiB idle, and about 80 MiB during a large upload.
 
 To cap the page cache anyway, set `memory_high = "2G"` and run `mica service setup --use-config-file`. Above the limit, the kernel reclaims mica's cache and slows mica down; it never kills it.
 
 ## Performance
 
-Measured on one laptop NVMe (btrfs), with 4 KiB `O_DIRECT` I/O in the guest filesystem:
+Measured in a local lab: RustFS behind a 100 MiB/s link with 1 ms round trip, and a local disk limited to 300 MiB/s. The full results, with v0.1 next to v0.2, are at <https://sites.tanmoysarkar.me/research/mica-v0-2-optimization/>.
 
-| Test | Plain NVMe | mica disk |
+| Test | v0.1 | v0.2 |
 |---|---|---|
-| Sequential write, 1 MiB | 836 MiB/s | 660 MiB/s |
-| Sequential read, 1 MiB | 1977 MiB/s | 2645 MiB/s |
-| Random read 4K, depth 1 | 14.2k IOPS, 67 µs | 24.8k IOPS, 31 µs |
-| Random read 4K, depth 8 | 130k IOPS | 175k IOPS |
-| Random write 4K, depth 1 | 28k IOPS | 28.5k IOPS |
-| Random write 4K, depth 8 | 112k IOPS | 195k IOPS |
-| 4K write + `fdatasync` | 970/s, 538 µs | 665/s, 886 µs |
-| Daemon restart | – | ~1 s pause, no errors |
+| Attach of one disk | 1,035 ms | 24 ms |
+| 4 disks attached at the same time | 4.2 s | 0.06 s |
+| Cold Firecracker boot (Ubuntu), attach until ssh answers | 4.6 s | 2.8 s |
+| S3 download during that boot | 250 MiB | 136 MiB |
+| Cold sequential read, 1 reader | 69 MiB/s | 91 MiB/s (the link) |
 
-mica keeps recent chunks in the host page cache, so warm I/O can beat the raw device. A flush costs more, because it syncs every changed chunk file.
-
-Cold reads and uploads are limited by the network to S3.
+Cold reads, the background fill and uploads are limited by the network to S3. Warm reads are limited by the local disk.
 
 ## Cost
 
@@ -205,13 +208,14 @@ On Cloudflare R2: storage $0.015 per GB-month, Class A requests (PUT, LIST) $4.5
 |---|---|---|---|
 | Idle attached disk | 0 | 0 | $0 |
 | Create and mount a new disk | 3 | ~11 | – |
-| Write 1 GiB of new data | 256 | – | $0.0012 |
-| A checkpoint after a small write | ~11 | ~2 | – |
-| Stop and start a sandbox | ~6 | ~90 | $0.00006 |
-| A disk busy all day, every day | ~144,000 / month | – | ~$0.65 / month |
+| Write 1 GiB of new data, 256 KiB chunks | 4,096 | – | $0.018 |
+| Write 1 GiB of new data, 4 MiB chunks | 256 | – | $0.0012 |
+| A checkpoint after a small write | ~4 | ~5 | – |
+| Stop and start a sandbox (Ubuntu, cold cache, 256 KiB chunks) | ~6 | ~550 | $0.0002 |
+| A disk busy all day, every day (a checkpoint every 30 s) | ~350,000 / month | ~430,000 / month | ~$1.70 / month |
 | 1 TB of stored data | – | – | ~$15 / month |
 
-Storage is the main cost. Disks made from one snapshot share its chunks, so an image is stored once. `mica status` shows the requests since mica started.
+Storage is the main cost. Chunks are compressed, and disks made from one snapshot share its chunks, so an image is stored once. Small chunks and frequent checkpoints cost more requests: set `--chunk-size 4M` and a longer `checkpoint_interval_secs` for disks where that matters more than cold reads. `mica status` shows the requests since mica started.
 
 ## Troubleshooting
 

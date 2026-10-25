@@ -1,4 +1,5 @@
 use crate::daemon::{Daemon, Prefetch};
+use crate::manifest::DEFAULT_CHUNK_SIZE;
 use crate::managed_mount::{self, FolderOwner};
 use crate::ownership::{self, Owner};
 use anyhow::{Context, Result, bail, ensure};
@@ -18,8 +19,16 @@ const RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Request {
-    Create { disk: String, size: Option<u64>, from_snapshot: Option<String> },
+    Create {
+        disk: String,
+        size: Option<u64>,
+        from_snapshot: Option<String>,
+        #[serde(default)]
+        chunk_size: Option<u64>,
+    },
     Snapshot { disk: String, name: String },
+    /// Upload the local changes of an attached disk now, and commit them.
+    Checkpoint { disk: String },
     Resize { disk: String, size: u64 },
     Attach {
         disk: String,
@@ -28,6 +37,9 @@ pub enum Request {
         prefetch: Option<usize>,
         #[serde(default)]
         prefetch_parallel: Option<usize>,
+        /// Override `background_fill` for this attach.
+        #[serde(default)]
+        fill: Option<bool>,
     },
     Detach { disk: String },
     Mount { disk: String, path: PathBuf, filesystem: String, force: bool, owner: FolderOwner },
@@ -148,7 +160,9 @@ async fn dispatch(daemon: &Arc<Daemon>, request: Request, caller_uid: Option<u32
         _ => log::info!("request: {request:?}"),
     }
     match request {
-        Request::Create { disk, size, from_snapshot } => create(daemon, &disk, size, from_snapshot).await,
+        Request::Create { disk, size, from_snapshot, chunk_size } => {
+            create(daemon, &disk, size, from_snapshot, chunk_size).await
+        }
         Request::Snapshot { disk, name } => snapshot(daemon, &disk, &name).await,
         Request::Resize { disk, size } => {
             if daemon.disks.lock().await.contains_key(&disk) {
@@ -157,10 +171,11 @@ async fn dispatch(daemon: &Arc<Daemon>, request: Request, caller_uid: Option<u32
             daemon.catalog().resize(&disk, size).await?;
             Ok(json!({ "disk": disk, "size": size }))
         }
-        Request::Attach { disk, force, prefetch, prefetch_parallel } => {
+        Request::Checkpoint { disk } => checkpoint(daemon, &disk).await,
+        Request::Attach { disk, force, prefetch, prefetch_parallel, fill } => {
             // Taking a disk from another node can lose its data, so only root may.
             ensure!(!force || caller_is_root, "--force needs root");
-            daemon.attach(&disk, force, Prefetch { chunks: prefetch, parallel: prefetch_parallel }).await
+            daemon.attach(&disk, force, Prefetch { chunks: prefetch, parallel: prefetch_parallel, fill }).await
         }
         Request::Detach { disk } => daemon.detach(&disk).await,
         Request::Mount { disk, path, filesystem, force, owner } => {
@@ -183,7 +198,7 @@ async fn dispatch(daemon: &Arc<Daemon>, request: Request, caller_uid: Option<u32
         Request::ListSnapshots => Ok(json!({ "snapshots": daemon.catalog().list_snapshots().await? })),
         Request::DescribeSnapshots { names } => describe_snapshots(daemon, names).await,
         Request::Warm { disk, parallel } => daemon.warm(&disk, parallel).await,
-        Request::CacheStatus => Ok(daemon.cache_usage().await),
+        Request::CacheStatus => daemon.cache_usage().await,
         Request::CachePrune { delete } => daemon.prune_cache(delete).await,
         Request::Gc { delete, grace_secs } => daemon.collect_garbage(delete, grace_secs).await,
         Request::DeleteSnapshot { name } => {
@@ -219,15 +234,31 @@ async fn describe_disks(daemon: &Daemon, disks: Vec<String>) -> Result<Value> {
     Ok(json!({ "disks": summaries }))
 }
 
-async fn create(daemon: &Daemon, disk: &str, size: Option<u64>, from_snapshot: Option<String>) -> Result<Value> {
+async fn create(
+    daemon: &Daemon,
+    disk: &str,
+    size: Option<u64>,
+    from_snapshot: Option<String>,
+    chunk_size: Option<u64>,
+) -> Result<Value> {
     let catalog = daemon.catalog();
     match (&from_snapshot, size) {
+        (Some(_), _) if chunk_size.is_some() => bail!("a disk from a snapshot has the chunk size of the snapshot"),
         (Some(snapshot), size) => catalog.clone_snapshot(snapshot, disk, size).await?,
-        (None, Some(size)) => catalog.create(disk, size).await?,
+        (None, Some(size)) => catalog.create(disk, size, chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE)).await?,
         (None, None) => bail!("give --size, or --from-snapshot"),
     }
-    let size = catalog.load(disk).await?.manifest.disk_size;
-    Ok(json!({ "disk": disk, "size": size, "from_snapshot": from_snapshot }))
+    let manifest = catalog.load(disk).await?.manifest;
+    Ok(json!({ "disk": disk, "size": manifest.disk_size, "chunk_size": manifest.chunk_size, "from_snapshot": from_snapshot }))
+}
+
+async fn checkpoint(daemon: &Arc<Daemon>, disk_id: &str) -> Result<Value> {
+    let attached = daemon.disks.lock().await.get(disk_id).map(|a| a.disk.clone());
+    let Some(disk) = attached else { bail!("disk {disk_id} is not attached on this node") };
+    let started = std::time::Instant::now();
+    disk.checkpoint().await?;
+    let status = disk.status();
+    Ok(json!({ "disk": disk_id, "seq": status.seq, "unsaved_bytes": status.unsaved_bytes, "ms": started.elapsed().as_millis() as u64 }))
 }
 
 /// An attached disk gets a checkpoint first, so the snapshot has its latest data.
