@@ -1,0 +1,19 @@
+# Small guest root filesystem for the lab VM: Alpine with OpenRC.
+FROM alpine:3.22
+RUN apk add --no-cache openrc busybox-mdev-openrc openssh python3 fio util-linux e2fsprogs procps xxhash openssl
+RUN echo lab-vm > /etc/hostname \
+    && passwd -d root \
+    && ssh-keygen -A \
+    && mkdir -p /root/.ssh && chmod 700 /root/.ssh \
+    && sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config \
+    && mkdir -p /etc/local.d \
+    && printf '#!/bin/sh\nmkdir -p /dev/shm\nmount -t tmpfs -o nosuid,nodev tmpfs /dev/shm\nip link set lo up\nip link set eth0 up\nip addr add 172.30.0.2/30 dev eth0\nip route add default via 172.30.0.1\n' > /etc/local.d/net.start \
+    && chmod +x /etc/local.d/net.start \
+    && printf '/dev/vda / ext4 rw,noatime 0 1\n' > /etc/fstab \
+    && printf '::sysinit:/sbin/openrc sysinit\n::sysinit:/sbin/openrc boot\n::wait:/sbin/openrc default\nttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100\n::ctrlaltdel:/sbin/reboot\n::shutdown:/sbin/openrc shutdown\n' > /etc/inittab \
+    && for s in devfs dmesg mdev; do rc-update add $s sysinit; done \
+    && for s in hostname bootmisc sysctl; do rc-update add $s boot; done \
+    && rc-update add local default \
+    && rc-update add sshd default \
+    && for s in killprocs mount-ro savecache; do rc-update add $s shutdown; done
+COPY authorized_keys /root/.ssh/authorized_keys

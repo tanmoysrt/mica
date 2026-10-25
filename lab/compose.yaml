@@ -1,0 +1,43 @@
+# Local S3 for the mica lab: RustFS behind a bandwidth and latency cap.
+# Rates come from lab/lab.env (through lab.sh); `lab.sh shape` applies new ones live.
+name: mica-lab
+
+services:
+  s3:
+    image: rustfs/rustfs:1.0.1
+    container_name: mica-lab-s3
+    environment:
+      RUSTFS_ACCESS_KEY: micalab
+      RUSTFS_SECRET_KEY: micalab-secret
+    volumes:
+      - s3-data:/data
+    networks:
+      lab:
+        ipv4_address: 172.31.99.10
+    restart: unless-stopped
+
+  # Shapes the s3 container's own network namespace, so the host needs no
+  # root: egress on eth0 is the download rate, ingress (through ifb0) the
+  # upload rate. netem adds half the round trip on each side.
+  shaper:
+    build: ./shaper
+    image: mica-lab-shaper
+    container_name: mica-lab-shaper
+    network_mode: service:s3
+    cap_add: [NET_ADMIN]
+    environment:
+      DOWN_RATE: ${DOWN_RATE:-800mibit}
+      UP_RATE: ${UP_RATE:-800mibit}
+      RTT_MS: ${RTT_MS:-1}
+    depends_on: [s3]
+    restart: unless-stopped
+
+networks:
+  lab:
+    name: mica-lab
+    ipam:
+      config:
+        - subnet: 172.31.99.0/24
+
+volumes:
+  s3-data:

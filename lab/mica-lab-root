@@ -1,0 +1,307 @@
+#!/bin/bash
+# Root helper for the local mica lab. Install a root-owned copy:
+#
+#   sudo install -o root -g root -m 0755 lab/mica-lab-root /usr/local/sbin/mica-lab-root
+#
+# and allow only this file in sudoers. Every verb is fixed, and every
+# argument is checked, so the sudo rule does not need wildcards.
+set -euo pipefail
+
+LAB_USER=tanmoy
+REPO=/home/tanmoy/Desktop/experiments/mica
+UNIT=mica-lab.service
+# SELinux does not let systemd run programs from a home folder, so the
+# build and the config are copied to root-owned paths.
+BIN=/usr/local/libexec/mica-lab/mica
+CONFIG=/etc/mica-lab/config.toml
+DATA_DIR=/var/lib/mica-lab
+MOUNT_ROOT=/mnt/mica-lab
+TAP=fc-tap0
+TAP_ADDR=172.30.0.1/30
+# Crash test: a second daemon whose data folder can lose every write.
+CRASH_UNIT=mica-crash.service
+CRASH_BIN=/usr/local/libexec/mica-lab/mica-crash
+CRASH_TOOL=/usr/local/libexec/mica-lab/ublk-del
+CRASH_CONFIG=/etc/mica-lab/crash.toml
+CRASH_DIR=/var/lib/mica-lab-crash
+CRASH_IMAGE=/var/lib/mica-lab-crash.img
+CRASH_DM=mica-crash
+CRASH_LOOP_FILE=/run/mica-crash.loop
+# What a reboot clears: the session files that tell mica the page cache survived.
+CRASH_SESSIONS=/run/mica/sessions/var-lib-mica-lab-crash
+
+die() { echo "mica-lab-root: $*" >&2; exit 1; }
+
+# Lab disks are named lab-<letters, digits, -, _>. Other disks are not touched.
+lab_disk() {
+    [[ $1 =~ ^lab-[A-Za-z0-9_-]{1,40}$ ]] || die "disk must be lab-<name>: $1"
+    echo "$1"
+}
+
+lab_device() {
+    local disk device
+    disk=$(lab_disk "$1")
+    device=$(readlink -f "/dev/mica/$disk") || die "no /dev/mica/$disk; attach it first"
+    [[ $device =~ ^/dev/ublkb[0-9]+$ ]] || die "unexpected device $device"
+    echo "$device"
+}
+
+# The block device that holds the lab data folder, for the cgroup I/O limit.
+data_device() {
+    local source
+    source=$(findmnt -no SOURCE -T "$DATA_DIR" | sed 's/\[.*//')
+    lsblk -no PKNAME "$source" | head -1 | sed 's|^|/dev/|'
+}
+
+install_unit() {
+    mkdir -p "$DATA_DIR"
+    if [[ $(findmnt -no FSTYPE -T /var/lib) == btrfs ]] && ! btrfs subvolume show "$DATA_DIR" >/dev/null 2>&1; then
+        rmdir "$DATA_DIR" && btrfs subvolume create "$DATA_DIR" >/dev/null
+    fi
+    cat > /etc/systemd/system/$UNIT <<EOF
+[Unit]
+Description=mica lab daemon (local benchmarks; not the main mica service)
+After=network-online.target docker.service
+
+[Service]
+Type=notify
+ExecStart=$BIN --config $CONFIG daemon
+KillSignal=SIGTERM
+TimeoutStopSec=600
+Restart=no
+EOF
+    systemctl daemon-reload
+    deploy
+    echo "installed $UNIT; data in $DATA_DIR"
+}
+
+# Copy the current build and lab config. A restart picks them up.
+deploy() {
+    install -D -o root -g root -m 0755 "$REPO/target/release/mica" "$BIN"
+    install -D -o root -g root -m 0600 "$REPO/lab/config.toml" "$CONFIG"
+    restorecon -R "$(dirname "$BIN")" "$(dirname "$CONFIG")" 2>/dev/null || true
+    echo "deployed $("$BIN" --version 2>/dev/null || echo mica)"
+}
+
+# limits <MiB/s or 0> <IOPS or 0>: cap the lab daemon's own disk I/O.
+set_limits() {
+    local bw=$1 iops=$2 device
+    [[ $bw =~ ^[0-9]{1,6}$ && $iops =~ ^[0-9]{1,7}$ ]] || die "usage: limits <MiB/s> <IOPS> (0 = no limit)"
+    device=$(data_device)
+    local rbw="$device $((bw * 1048576))" riops="$device $iops"
+    ((bw == 0)) && rbw="$device infinity"
+    ((iops == 0)) && riops="$device infinity"
+    systemctl set-property --runtime $UNIT \
+        "IOReadBandwidthMax=$rbw" "IOWriteBandwidthMax=$rbw" \
+        "IOReadIOPSMax=$riops" "IOWriteIOPSMax=$riops"
+    echo "limits on $device: $bw MiB/s, $iops IOPS (0 = no limit)"
+}
+
+mount_disk() {
+    local disk device fs=${2:-ext4} target
+    disk=$(lab_disk "$1")
+    device=$(lab_device "$disk")
+    [[ $fs == ext4 || $fs == xfs ]] || die "fs must be ext4 or xfs"
+    target=$MOUNT_ROOT/$disk
+    if ! blkid -p "$device" >/dev/null 2>&1; then
+        if [[ $fs == ext4 ]]; then mkfs.ext4 -q -E nodiscard "$device"; else mkfs.xfs -q -K "$device"; fi
+    fi
+    mkdir -p "$target"
+    mount -o noatime "$device" "$target"
+    chown "$LAB_USER:" "$target"
+    echo "mounted $disk ($device) at $target"
+}
+
+umount_disk() {
+    local disk target
+    disk=$(lab_disk "$1")
+    target=$MOUNT_ROOT/$disk
+    mountpoint -q "$target" || die "$target is not mounted"
+    fstrim "$target" || true
+    umount "$target"
+    echo "unmounted $target"
+}
+
+tap() {
+    case $1 in
+        up)
+            ip link show $TAP >/dev/null 2>&1 || ip tuntap add dev $TAP mode tap user $LAB_USER
+            ip addr replace $TAP_ADDR dev $TAP
+            ip link set $TAP up
+            ;;
+        down) ip link del $TAP 2>/dev/null || true ;;
+        *) die "usage: tap up|down" ;;
+    esac
+}
+
+crash_table() { # linear | drop
+    local loop size
+    loop=$(cat $CRASH_LOOP_FILE)
+    size=$(blockdev --getsz "$loop")
+    if [[ $1 == drop ]]; then
+        echo "0 $size flakey $loop 0 0 180 1 drop_writes"
+    else
+        echo "0 $size linear $loop 0"
+    fi
+}
+
+# No fs freeze and no flush on suspend: what the page cache holds stays unwritten.
+crash_switch() {
+    dmsetup suspend --nolockfs --noflush $CRASH_DM
+    dmsetup load $CRASH_DM --table "$(crash_table "$1")"
+    dmsetup resume $CRASH_DM
+}
+
+crash_setup() {
+    local fs=${1:-btrfs} loop
+    [[ $fs == btrfs || $fs == xfs || $fs == ext4 ]] || die "fs must be btrfs, xfs or ext4"
+    [[ -e /dev/mapper/$CRASH_DM ]] && die "the crash device exists; run crash down first"
+    rm -f $CRASH_IMAGE
+    touch $CRASH_IMAGE
+    chattr +C $CRASH_IMAGE 2>/dev/null || true
+    truncate -s 12G $CRASH_IMAGE
+    loop=$(losetup -f --show $CRASH_IMAGE)
+    echo "$loop" > $CRASH_LOOP_FILE
+    dmsetup create $CRASH_DM --table "$(crash_table linear)"
+    case $fs in
+        btrfs) mkfs.btrfs -q -f /dev/mapper/$CRASH_DM ;;
+        xfs) mkfs.xfs -q -f /dev/mapper/$CRASH_DM ;;
+        ext4) mkfs.ext4 -q -F -E nodiscard /dev/mapper/$CRASH_DM ;;
+    esac
+    mkdir -p $CRASH_DIR
+    mount -o noatime /dev/mapper/$CRASH_DM $CRASH_DIR
+    printf '%s\n' \
+        "[Unit]" \
+        "Description=mica crash-test daemon (lab only)" \
+        "After=network-online.target docker.service" \
+        "" \
+        "[Service]" \
+        "Type=notify" \
+        "ExecStart=$CRASH_BIN --config $CRASH_CONFIG daemon" \
+        "KillSignal=SIGTERM" \
+        "TimeoutStopSec=600" \
+        "Restart=no" > /etc/systemd/system/$CRASH_UNIT
+    systemctl daemon-reload
+    echo "crash device ready: $fs on $loop at $CRASH_DIR"
+}
+
+# crash deploy [baseline]: the current build, or ~/.cache/mica-lab/mica-<name>.
+crash_deploy() {
+    local source=$REPO/target/release/mica
+    if [[ -n ${1:-} ]]; then
+        [[ $1 =~ ^mica-[A-Za-z0-9._-]{1,40}$ ]] || die "baseline must be mica-<name>"
+        source=/home/$LAB_USER/.cache/mica-lab/$1
+    fi
+    install -D -o root -g root -m 0755 "$source" $CRASH_BIN
+    install -D -o root -g root -m 0755 "$REPO/lab/crash/ublk-del/target/release/ublk-del" $CRASH_TOOL
+    install -D -o root -g root -m 0600 "$REPO/lab/crash/config.toml" $CRASH_CONFIG
+    restorecon -R "$(dirname $CRASH_BIN)" "$(dirname $CRASH_CONFIG)" 2>/dev/null || true
+    echo "deployed $($CRASH_BIN --version 2>/dev/null || echo mica) for the crash test"
+}
+
+# The ublk devices of the crash daemon that no process serves now. A live
+# daemon holds its devices' control files open, so another daemon's
+# device is never listed.
+crash_devices() {
+    local state id
+    for state in $CRASH_DIR/disks/*/state; do
+        [[ -f $state ]] || continue
+        id=$(jq -r '.ublk_id // empty' "$state")
+        [[ $id =~ ^[0-9]{1,4}$ ]] || continue
+        [[ -e /dev/ublkc$id ]] || continue
+        fuser -s "/dev/ublkc$id" 2>/dev/null && continue
+        echo "$id"
+    done
+}
+
+# After a cut: what a reboot does. The daemon dies, its devices go, and
+# the data folder comes back as the device had it at the cut.
+crash_reboot() {
+    local id
+    systemctl kill -s KILL $CRASH_UNIT 2>/dev/null || true
+    while systemctl is-active -q $CRASH_UNIT; do sleep 0.1; done
+    systemctl reset-failed $CRASH_UNIT 2>/dev/null || true
+    for id in $(crash_devices); do
+        if [[ -e /sys/class/ublk-char/ublkc$id ]]; then $CRASH_TOOL "$id"; fi
+    done
+    rm -rf $CRASH_SESSIONS
+    for _ in $(seq 50); do umount $CRASH_DIR 2>/dev/null && break; sleep 0.2; done
+    mountpoint -q $CRASH_DIR && die "cannot unmount $CRASH_DIR"
+    crash_switch linear
+    mount -o noatime /dev/mapper/$CRASH_DM $CRASH_DIR
+    echo "rebooted: $CRASH_DIR is back as the device had it at the cut"
+}
+
+# A daemon crash: the device, the page cache and /run stay.
+crash_kill() {
+    systemctl kill -s KILL $CRASH_UNIT 2>/dev/null || true
+    while systemctl is-active -q $CRASH_UNIT; do sleep 0.1; done
+    systemctl reset-failed $CRASH_UNIT 2>/dev/null || true
+    echo "killed the crash daemon; its devices wait for the next one"
+}
+
+crash_down() {
+    local id
+    systemctl kill -s KILL $CRASH_UNIT 2>/dev/null || true
+    while systemctl is-active -q $CRASH_UNIT; do sleep 0.1; done
+    systemctl reset-failed $CRASH_UNIT 2>/dev/null || true
+    if mountpoint -q $CRASH_DIR; then
+        for id in $(crash_devices); do $CRASH_TOOL "$id" || true; done
+        umount $CRASH_DIR
+    fi
+    rm -rf $CRASH_SESSIONS
+    if [[ -e /dev/mapper/$CRASH_DM ]]; then dmsetup remove $CRASH_DM; fi
+    if [[ -f $CRASH_LOOP_FILE ]]; then losetup -d "$(cat $CRASH_LOOP_FILE)"; rm -f $CRASH_LOOP_FILE; fi
+    rm -f $CRASH_IMAGE
+    echo "crash device removed"
+}
+
+crash() {
+    case ${1:-} in
+        setup) crash_setup "${2:-}" ;;
+        deploy) crash_deploy "${2:-}" ;;
+        start | stop | status) systemctl "$1" $CRASH_UNIT ;;
+        logs) journalctl -u $CRASH_UNIT --no-pager -n "${2:-200}" ;;
+        cut) crash_switch drop && echo "cut: every write from now on is lost" ;;
+        reboot) crash_reboot ;;
+        kill) crash_kill ;;
+        down) crash_down ;;
+        *) die "usage: crash setup [btrfs|xfs|ext4]|deploy [baseline]|start|stop|status|logs [n]|cut|reboot|kill|down" ;;
+    esac
+}
+
+case ${1:-} in
+    install) install_unit ;;
+    deploy) deploy ;;
+    start | stop | restart | status) systemctl "$1" $UNIT ;;
+    logs) journalctl -u $UNIT --no-pager -n "${2:-200}" ;;
+    limits) set_limits "${2:-}" "${3:-}" ;;
+    own) chown "$LAB_USER:" "$(lab_device "${2:-}")" ;;
+    mount) mount_disk "${2:-}" "${3:-}" ;;
+    umount) umount_disk "${2:-}" ;;
+    drop-caches) sync && echo 3 > /proc/sys/vm/drop_caches ;;
+    tap) tap "${2:-}" ;;
+    crash) crash "${2:-}" "${3:-}" ;;
+    *)
+        cat >&2 <<EOF
+usage: mica-lab-root <verb>
+  install                 write $UNIT, make $DATA_DIR, deploy
+  deploy                  copy target/release/mica and lab/config.toml
+  start|stop|restart|status|logs [n]
+  limits <MiB/s> <IOPS>   cap the lab daemon's disk I/O (0 = no limit)
+  own <lab-disk>          give the raw device to $LAB_USER (for Firecracker)
+  mount <lab-disk> [fs]   format if blank, mount at $MOUNT_ROOT/<disk>
+  umount <lab-disk>       fstrim and unmount
+  drop-caches             sync and drop the page cache
+  tap up|down             $TAP for the Firecracker VM ($TAP_ADDR)
+  crash setup [fs]        a $CRASH_DM device (btrfs, xfs or ext4) at $CRASH_DIR, and $CRASH_UNIT
+  crash deploy [base]     the current build (or a saved mica-<name> baseline) for the crash daemon
+  crash start|stop|status|logs [n]
+  crash cut               drop every write to $CRASH_DM from now on
+  crash reboot            kill the daemon, delete its devices, remount as at the cut
+  crash kill              kill the daemon only; its devices wait for the next one
+  crash down              remove the crash device and its image
+EOF
+        exit 2
+        ;;
+esac

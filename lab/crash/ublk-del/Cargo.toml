@@ -1,0 +1,12 @@
+[package]
+name = "ublk-del"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Not part of the mica workspace: a lab tool only.
+[workspace]
+
+[dependencies]
+io-uring = "0.7"
+libublk = "0.4.8"
