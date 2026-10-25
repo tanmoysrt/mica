@@ -17,6 +17,17 @@ Explore:
 - [ ] Remeasure 4 KiB workloads rather than assume negligible gains. Test compressed cold reads, FUA/FLUSH, and daemon recovery for correctness. [Android evaluation](https://lpc.events/event/18/contributions/1710/attachments/1440/3070/LPC2024_ublk_zero_copy.pdf)
 - [ ] Defer shared-memory zero-copy unless a cooperating client requires it.
 
+## Keep attached disks fully cached
+
+Today the chunk cache evicts the least recently used chunks at `cache_limit_gib`, from any disk. An attached disk can lose its cached chunks, and its next reads go to S3 again. The background fill also stops for good once the cache reaches 90%, because eviction keeps it at 90%.
+
+Idea: a cache mode with no LRU eviction. Every chunk of an attached disk stays local until the disk detaches. A cache GC removes chunks that no attached disk uses: after a detach, and when space runs low.
+
+- Config: for example `cache_eviction = "lru" | "attached"`. This changes a policy, not an implementation.
+- Admission: refuse an attach, or turn off its fill, when the cache cannot hold the disk's chunks. Count the chunks of each attached disk once, because disks share chunks.
+- Detached disks: keep their chunks while space allows, so a disk that comes back attaches warm. The cache GC removes those first.
+- Check the fill: with this mode it must fill every attached disk completely.
+
 ## Other open items
 
 - On btrfs, a synced 4 KiB write costs about 50 µs more in a 1 GiB data file than in a new small file (idle write plus `fdatasync` 3% slower than v0.2a on a quiet host). Smaller data files do not help. Check XFS and ext4.
