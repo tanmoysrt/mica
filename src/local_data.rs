@@ -124,6 +124,16 @@ impl LocalData {
         self.segments[segment].clone()
     }
 
+    /// Starts writeback of a data file's dirty pages, without waiting.
+    /// It reports no writeback error: only the FLUSH sync checks those.
+    pub fn start_writeback(&self, segment: usize) -> Result<()> {
+        let fd = self.segments[segment].as_raw_fd();
+        if unsafe { libc::sync_file_range(fd, 0, 0, libc::SYNC_FILE_RANGE_WRITE) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(())
+    }
+
     pub fn read_chunk(&self, index: usize) -> Result<Vec<u8>> {
         let (file, offset) = self.location(index);
         let mut data = vec![0u8; self.chunk_size as usize];

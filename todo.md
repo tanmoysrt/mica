@@ -8,10 +8,19 @@ Today each request is copied once between the kernel and the daemon's buffer. Wi
 - Work: local reads and writes on the queue thread become `READ_FIXED`/`WRITE_FIXED`. Cache misses and writes to chunks that are not local must finish on the queue ring, because the daemon no longer has the data in its buffer. Then a codex review and the crash test again.
 - Before starting: profile the 4-writer 1 MiB test with `perf`. Skip if the copy is under about 10% of CPU.
 
+Explore:
+
+- [ ] Prefer `UBLK_F_AUTO_BUF_REG` over manual buffer registration. Probe support and preserve a fallback. [Upstream discussion](https://lwn.net/Articles/1020732/)
+- [ ] Benchmark fixed-file registration for stable backing files separately from fixed-buffer zero-copy. [Loop example](https://github.com/ublk-org/libublk-rs/blob/main/examples/loop.rs)
+- [ ] Measure per-queue CPU use with single and multiple submitters. Try extra threads per queue only for saturated workloads, and check shallow-I/O latency. [Benchmark caveats](https://github.com/ublk-org/libublk-rs#benchmarking-caveat-one-submitter-measures-one-queue)
+- [ ] Evaluate `UBLK_F_BATCH_IO` independently after zero-copy. Treat upstream null-target gains as framework measurements, not expected Mica gains. [Upstream benchmarks](https://lwn.net/Articles/1046200/)
+- [ ] Remeasure 4 KiB workloads rather than assume negligible gains. Test compressed cold reads, FUA/FLUSH, and daemon recovery for correctness. [Android evaluation](https://lpc.events/event/18/contributions/1710/attachments/1440/3070/LPC2024_ublk_zero_copy.pdf)
+- [ ] Defer shared-memory zero-copy unless a cooperating client requires it.
+
 ## Other open items
 
-- Idle write plus `fdatasync` is 19% slower than v0.2a (1629 to 1317/s).
-- FLUSH during a large upload is slow: the data file sync waits behind the upload's writeback.
+- On btrfs, a synced 4 KiB write costs about 50 µs more in a 1 GiB data file than in a new small file (idle write plus `fdatasync` 3% slower than v0.2a on a quiet host). Smaller data files do not help. Check XFS and ext4.
+- In the lab, RustFS shares the btrfs and SSD with the lab daemon, so an upload slows the daemon's syncs. A loop-mounted XFS for RustFS did not help.
 - A page that GC deletes between commit and repair is lost on a power cut (also in v0.2a).
 - Without conditional writes in S3, two GCs can still overlap.
 - No crash-test baseline run on v0.2a.

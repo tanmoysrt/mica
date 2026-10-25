@@ -280,9 +280,11 @@ Step 1 takes the chunks first: a chunk in that list marked its data file before 
 
 One FLUSH runs at a time. mica counts the writes done, and the writes that a FLUSH made durable. A FLUSH that finds its writes durable already returns at once, so FLUSHes that wait for each other share one sync.
 
-A FUA write is a write and a full FLUSH, in the engine. The queue thread never syncs. Linux reports a writeback error only once to each open file, so two syncs at the same time could each miss a failure that the other saw. With one FLUSH at a time, a failed sync stops the disk before the next sync can succeed.
+A FUA write is a write and then the same steps for only its own chunks and data files, in the engine, under the same FLUSH lock. The queue thread never syncs. Linux reports a writeback error only once to each open file, so two syncs at the same time could each miss a failure that the other saw. With one FLUSH at a time, a failed sync stops the disk before the next sync can succeed.
 
 A data file written before a crash is in the list of the next FLUSH, because it can hold writes that the guest did not flush.
+
+Linux starts writeback late: after 10% of free memory is dirty, or after 30 s. A guest that writes 2 GiB and then flushes would wait for all 2 GiB in that one FLUSH, 16 s on a 125 MiB/s disk. So after each 16 MiB of writes, mica starts writeback of the unsynced data files with `sync_file_range(SYNC_FILE_RANGE_WRITE)`. That call does not wait, and does not take the writeback error that the FLUSH `fdatasync` must see. In the lab, the longest FLUSH after a 2 GiB write fell from 2.5–3.1 s to 0.3–0.8 s.
 
 A FLUSH never touches S3.
 

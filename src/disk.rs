@@ -25,6 +25,10 @@ const SLOW_FLUSH: Duration = Duration::from_millis(200);
 const READS_POLL: Duration = Duration::from_millis(1);
 /// Held copies stay in memory up to this size per disk, then go to the hold file.
 const HELD_IN_MEMORY: u64 = 64 << 20;
+/// Writeback of the data files starts after this many bytes of writes.
+/// Linux would wait until gigabytes are dirty, and the next FLUSH would
+/// then write all of them.
+const WRITEBACK_AFTER: u64 = 16 << 20;
 
 /// One attached disk. It turns block reads and writes into chunk operations.
 /// It knows nothing about ublk.
@@ -63,6 +67,9 @@ pub struct Disk {
     pub(crate) held_on_file: AtomicBool,
     /// Data files written since the last FLUSH.
     pub(crate) unsynced_segments: Mutex<BTreeSet<usize>>,
+    /// Bytes written since the last start of writeback.
+    written_bytes: AtomicU64,
+    writeback_wanted: Notify,
     /// Writes done, and how many of them a FLUSH made durable. A FLUSH
     /// that finds all writes before it durable has nothing to do.
     pub(crate) writes_done: AtomicU64,
@@ -217,6 +224,8 @@ impl Disk {
             held: Mutex::default(),
             held_on_file: AtomicBool::new(false),
             unsynced_segments: Mutex::default(),
+            written_bytes: AtomicU64::new(0),
+            writeback_wanted: Notify::new(),
             // Above zero: the first FLUSH syncs what a crashed daemon left.
             writes_done: AtomicU64::new(1),
             writes_synced: AtomicU64::new(0),
@@ -579,6 +588,7 @@ impl Disk {
     pub fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
         self.checkpoint_wanted.notify_one();
+        self.writeback_wanted.notify_one();
     }
 
     pub fn is_closed(&self) -> bool {
@@ -624,8 +634,9 @@ impl Disk {
         self.mark_unsaved(&mut slot, index);
         let (file, start) = self.data.location(index);
         let (file, offset) = (file.clone(), start + part.offset);
+        let bytes = part.buffer.len() as u64;
         blocking(move || Ok(file.write_all_at(&data[part.buffer], offset)?)).await?;
-        self.finish_write(&mut slot, index)
+        self.finish_write(&mut slot, index, bytes)
     }
 
     /// Puts the chunk's current content into the data files, before a part
@@ -686,12 +697,34 @@ impl Disk {
 
     /// After the data is in its file: the data file is marked for FLUSH
     /// before the chunk is listed, so a FLUSH that logs the chunk syncs it.
-    pub(crate) fn finish_write(&self, slot: &mut ChunkSlot, index: usize) -> Result<()> {
+    pub(crate) fn finish_write(&self, slot: &mut ChunkSlot, index: usize, bytes: u64) -> Result<()> {
         self.unsynced_segments.lock().unwrap().insert(self.data.segment_of(index));
         self.data.log().note_write(index)?;
         self.writes_done.fetch_add(1, Ordering::SeqCst);
         slot.written = Some(Instant::now());
+        if self.written_bytes.fetch_add(bytes, Ordering::Relaxed) + bytes >= WRITEBACK_AFTER {
+            self.written_bytes.store(0, Ordering::Relaxed);
+            self.writeback_wanted.notify_one();
+        }
         Ok(())
+    }
+
+    /// Starts writeback of the data files written since the last FLUSH, so
+    /// that a FLUSH finds little left to write. It does not wait, and it
+    /// makes nothing durable: FLUSH still syncs every data file.
+    pub async fn run_writeback(self: Arc<Self>) {
+        loop {
+            self.writeback_wanted.notified().await;
+            if self.is_closed() {
+                return;
+            }
+            let segments: Vec<usize> = self.unsynced_segments.lock().unwrap().iter().copied().collect();
+            let data = self.data.clone();
+            let started = blocking(move || segments.iter().try_for_each(|&segment| data.start_writeback(segment)));
+            if let Err(error) = started.await {
+                log::warn!("disk {}: could not start writeback: {error:#}", self.id);
+            }
+        }
     }
 
     async fn zero_whole_chunk(&self, index: usize) -> Result<()> {
@@ -706,7 +739,7 @@ impl Disk {
         self.mark_unsaved(&mut slot, index);
         let data = self.data.clone();
         blocking(move || data.zero(index)).await?;
-        self.finish_write(&mut slot, index)
+        self.finish_write(&mut slot, index, 0)
     }
 
     fn unsaved_chunk_added(&self) {

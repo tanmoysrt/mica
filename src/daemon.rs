@@ -382,6 +382,7 @@ impl Daemon {
         let link = link_device(&folder.disk_id, &device.path)?;
         tokio::spawn(run_checkpoints(disk.clone(), self.checkpoint_interval()));
         tokio::spawn(ownership::watch(disk.clone()));
+        tokio::spawn(disk.clone().run_writeback());
         if let Some(queue) = disk.take_fetch_queue() {
             let startup_chunks = match prefetch.chunks {
                 Some(chunks) => chunks,

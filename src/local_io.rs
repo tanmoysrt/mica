@@ -86,7 +86,7 @@ impl LocalWrite<'_> {
     /// An error here (the `recent` list) fails the request.
     pub fn finish(mut self) -> anyhow::Result<()> {
         for part in &mut self.parts {
-            self.disk.finish_write(&mut part.slot, part.part.index)?;
+            self.disk.finish_write(&mut part.slot, part.part.index, part.part.buffer.len() as u64)?;
         }
         self.disk.note_unsaved_write();
         Ok(())

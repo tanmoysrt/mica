@@ -186,7 +186,7 @@ This needs no lock wait, no S3 and no other thread. Anything else goes to the di
 
 The device tells the kernel that it has a volatile write cache. So filesystems send FLUSH when they need durability (`fsync`, journal commits, `umount`).
 
-On FLUSH, mica syncs the data files written since the last FLUSH, at the same time. Then it appends the chunks that became local to the dirty log, and syncs the log. The order matters: the log never lists a chunk whose data a power loss could lose. Most FLUSHes are one `fdatasync`. One FLUSH runs at a time, and a FLUSH that finds its writes durable already returns at once. **A flush never touches S3.** When a flush returns, the data survives a crash of mica or a reboot of the node.
+On FLUSH, mica syncs the data files written since the last FLUSH, at the same time. Then it appends the chunks that became local to the dirty log, and syncs the log. The order matters: the log never lists a chunk whose data a power loss could lose. Most FLUSHes are one `fdatasync`. mica starts writeback after each 16 MiB of writes, so a FLUSH after a large write finds little left to write. One FLUSH runs at a time, and a FLUSH that finds its writes durable already returns at once. **A flush never touches S3.** When a flush returns, the data survives a crash of mica or a reboot of the node.
 
 A write that returned survives a crash of mica even before a FLUSH: the page cache keeps it, and `recent` tells the next daemon which chunks it touched.
 
