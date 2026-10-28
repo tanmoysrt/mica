@@ -67,7 +67,7 @@ pub enum DiskCommand {
         /// Filesystem for a new disk
         #[arg(long, default_value = "ext4")]
         fs: String,
-        /// FolderOwner of the disk's top folder [default: you, for a new disk]
+        /// Owner of the disk's top folder [default: you, for a new disk]
         #[arg(long, value_name = "USER[:GROUP]")]
         owner: Option<String>,
         /// Take the disk from another node (root only)
@@ -84,8 +84,10 @@ pub enum DiskCommand {
     /// Change the clean-cache or pending-write budget
     SetLimits {
         disk: String,
+        /// Clean cache budget, such as 500M
         #[arg(long)]
         cache_size: Option<String>,
+        /// Pending-write budget, such as 256M
         #[arg(long)]
         dirty_size: Option<String>,
     },

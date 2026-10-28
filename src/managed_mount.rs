@@ -117,8 +117,14 @@ pub async fn umount_with_unit(daemon: &Arc<Daemon>, target: &str) -> Result<Valu
     let unit = mount_unit(&disk);
     // The unit's stop step unmounts and detaches, and waits for the upload.
     run_systemctl(&["disable", "--now", "--quiet", &unit]).await?;
+    // After a failed stop step (such as "target is busy") the unit stays
+    // failed, and systemd does not run that step again. Run it here, so a
+    // retry works.
     if daemon.disks.lock().await.contains_key(&disk) {
-        bail!("cannot unmount disk {disk}. See: journalctl -u {unit}");
+        let _ = run_systemctl(&["reset-failed", "--quiet", &unit]).await;
+        unit_stop(&daemon.config.socket, &disk)
+            .await
+            .with_context(|| format!("cannot unmount disk {disk}"))?;
     }
     MountSpec::remove(&daemon.config_path, &disk)?;
     Ok(json!({ "managed": true, "disk": disk }))
