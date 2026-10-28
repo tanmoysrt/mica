@@ -49,6 +49,16 @@ pub struct RequestCounts {
 }
 
 impl Bucket {
+    #[cfg(test)]
+    pub(crate) fn in_memory() -> Self {
+        Self {
+            store: Arc::new(object_store::memory::InMemory::new()),
+            prefix: String::new(),
+            conditional_writes: true,
+            requests: RequestCounters::default(),
+        }
+    }
+
     pub fn connect(config: &S3Config) -> Result<Self> {
         config.validate()?;
         let store = AmazonS3Builder::new()

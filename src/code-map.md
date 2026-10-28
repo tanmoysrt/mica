@@ -22,7 +22,7 @@ Then read the helper files in the table below when you need them.
 |---|---|
 | `main.rs` | CLI parsing. Starts the daemon or runs a CLI command. Isolates the mount namespace of the daemon. |
 | `commands.rs` | Top-level CLI commands, the questions before lists and deletes, size parsing (`20G`). |
-| `disk_commands.rs` | `mica disk ls / create / attach / mount / unmount / detach / resize / delete`. |
+| `disk_commands.rs` | `mica disk ls / create / attach / mount / unmount / detach / set-limits / resize / delete`. |
 | `snapshot_commands.rs` | `mica snapshot ls / create / delete`. |
 | `output.rs` | Text output: tables, sizes and ages. |
 | `api.rs` | `Request` enum, socket server, socket client, and the dispatch of each request. |
@@ -43,7 +43,11 @@ Then read the helper files in the table below when you need them.
 | `prefetch.rs` | Read-ahead for sequential reads, the startup prefetch from the read profile, and the background fill. |
 | `read_profile.rs` | Records the first reads of a session (up to 64 MiB of chunks). |
 | `local_data.rs` | `LocalData`: the data files, the hold file, and the dirty log (`DirtyLog`) with the `recent` bitmap in /run (`RecentMap`). Punches out unlisted ranges at open. |
-| `chunk_cache.rs` | Clean chunks shared by all disks on the node. Downloads from S3 in three classes (reads, likely reads, fill), decompresses and checks the hash, checks files found at start, evicts old chunks, prunes unused ones. |
+| `cache_manager.rs` | Per-disk cache instances and host capacity reconciliation. |
+| `disk_limits.rs` | Persisted clean-cache and pending-write budgets. |
+| `disk_resize.rs` | Online engine growth and budget updates. |
+| `disk_operations.rs` | Serialized lifecycle operations and storage reconciliation. |
+| `chunk_cache.rs` | Clean chunks of one disk. Downloads from S3 in three classes (reads, likely reads, fill), decompresses and checks the hash, checks files found at start, evicts old chunks, prunes unused ones. |
 
 ### S3 objects
 

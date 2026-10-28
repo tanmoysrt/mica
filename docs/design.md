@@ -180,7 +180,7 @@ A GC writes `gc/last` after its last delete, and before it deletes `gc/lock`. Se
 ```text
 /var/lib/mica/
   node-id                          random ID of this node
-  cache/<first 2 hex>/<chunk hash>   clean chunks, not compressed, shared by all disks, can be evicted
+  disk-cache/<disk>/<xx>/<hash>     clean chunks, independently limited per disk
   pages/<first 2 hex>/<page hash>    pages, not compressed, shared by all disks
   disks/<disk-id>/
     state                          status of the disk: attached or orphaned
@@ -189,7 +189,7 @@ A GC writes `gc/last` after its last delete, and before it deletes `gc/lock`. Se
     dirty/hold                     sparse: held copies of chunks that the running checkpoint uploads
 ```
 
-All files of `dirty/` exist from the attach on. No write, FLUSH or checkpoint makes, renames or deletes a file in it, so nothing ever syncs the folder after the attach.
+Attach creates the current data files. Writes, FLUSH and checkpoints do not create files. Online growth can add data files, extend the held-copy file and remap the recent bitmap; it syncs the directory before publishing the larger size.
 
 **The dirty log** has two files, used in turn. Each starts with a header: a magic, a generation, the list of chunks and a CRC. A FLUSH appends records, each with its own CRC. A rewrite writes the other file with the next generation and syncs it before it counts. After a crash, mica takes the whole file with the higher generation, up to its first bad record. A torn rewrite fails its CRC, so the older file counts.
 
@@ -312,7 +312,7 @@ Steps:
 6. **Check owner.** GET `attached`. It must have our `node_id`.
 7. **Commit.** PUT the new `head` with `seq + 1` and the current read profile.
 8. **Repair.** Read GC activity again. If a GC ran during the checkpoint, wait until it ends (at most 10 minutes; if it still runs, the checkpoint fails and is retried). Then HEAD every committed page and chunk, and upload a missing one again: a page from the page store, a chunk from the data file if the guest did not write it since its stage, else from its held copy. A chunk that is missing and has neither fails the checkpoint: its chunk stays unsaved, and the next checkpoint uploads it again. That can happen only to a chunk released early in a checkpoint that ran longer than the GC grace.
-9. **Finish.** Each chunk that the guest did not write since its stage is saved. It stays local. Drop the held copies. If local data is over `dirty_limit_gib`, free the oldest saved chunks: copy each into the cache, rewrite the log without them, wait for the read passes, then punch out their ranges.
+9. **Finish.** Each chunk that the guest did not write since its stage is saved. Drop held copies, copy saved chunks into the disk's clean cache, rewrite the log without them, wait for read passes, then punch out their ranges. The reconciler retries incomplete reclamation.
 
 **Why an upload can be safe early.** GC deletes an object only if it was older than the grace period when GC checked it, just before the delete. A PUT makes the age new. So GC can delete our upload only if that GC was running when the PUT ended. A GC writes `gc/lock` before it lists anything. Thus if a read of GC activity after the PUT shows no lock and the same `gc/last`, no GC was running when the PUT ended, and none ran in between.
 
@@ -408,9 +408,9 @@ Detach always waits. When it succeeds, S3 has all data and the disk is free. A c
 
 1. Remove the ublk device. If the device is open or mounted, stop with an error. Stop the VM, unmount the filesystem or stop the container first. mica checks this with an `O_EXCL` open of the device.
 2. Run checkpoints until one succeeds. Network errors are retried.
-3. Copy the local chunks into `cache/`, a reflink where the filesystem can. Then delete `disks/<disk-id>/dirty/`. S3 has all of it now.
+3. Copy the local chunks into `disk-cache/<disk>/`, a reflink where the filesystem can. Then delete `disks/<disk-id>/dirty/`. S3 has all of it now.
 4. Delete `attached`, if it has our `node_id`.
-5. Delete `disks/<disk-id>/`. Keep the chunks in `cache/`.
+5. Delete `disks/<disk-id>/`. Keep the chunks in `disk-cache/<disk>/`.
 
 Step 3 comes before step 4. After a crash, a disk folder without chunks is safe to delete. Chunks without our marker are not safe to upload.
 
@@ -472,7 +472,7 @@ For labs, the image profile comes from its first boot, so every later boot is fa
 
 A fetch takes its slots before the download lock of its chunk. Thus a read of the same chunk never waits behind a fetch that waits for its turn. Every fetch stops when its disk closes.
 
-The chunk cache is shared by all disks on a node. When many VMs on a node use the same image, only the first boot gets the chunks from S3.
+Clean caches are independent per disk, so one disk cannot consume another disk's cache budget. Metadata pages and S3 objects remain shared.
 
 ## 15. Snapshot and clone
 
@@ -526,7 +526,7 @@ The checkpoint reads `gc/lock` before `gc/last`, never at the same time. A GC wr
 
 `mica cache status` shows how much the cache holds, and how much of it the attached disks use. `mica cache prune` deletes the chunks that no attached disk uses. A pruned chunk is downloaded again if a disk needs it later.
 
-**Dirty space.** `dirty_limit_gib` limits unsaved data. At half of the limit, or at `checkpoint_after_mib`, a checkpoint starts. At the limit, new writes wait until a checkpoint saves chunks. The guest sees a slow disk, not an I/O error. Saved chunks stay local too, until all local data passes the same limit: then the oldest saved chunks go into the cache, and their space is freed.
+**Dirty space.** `dirty_limit_gib` limits unsaved data. At half of the limit, or at `checkpoint_after_mib`, a checkpoint starts. At the limit, new writes wait until a checkpoint saves chunks. The guest sees a slow disk, not an I/O error. Saved chunks move to the separately budgeted clean cache after commit, and their data-file ranges are freed.
 
 ## 18. Defaults
 
@@ -610,3 +610,9 @@ The daemon runs in its own mount namespace. The libublk README requires this: a 
 ## 20. Not built yet
 
 - A Docker volume plugin or a Kubernetes CSI driver. For v1, use `mica disk mount` on the host and bind-mount the path.
+
+## Online growth
+
+Resize and other disk mutations use the same per-disk operation lock as attach and detach. Detached mutations claim the S3 ownership marker for their duration. Creating a head uses create-if-absent when the store supports conditional writes. Without conditional writes, the controller must still serialize operations across nodes.
+
+An attached resize holds the checkpoint lock. It extends local backing files and the recent bitmap, writes a larger root and head after confirming ownership, publishes the larger engine size, then sends the ublk size update. Existing chunk locks remain valid while metadata pages are appended. Kernel-update failures are retried by repeating resize or during device recovery. Filesystem and hypervisor growth remain the caller's responsibility.

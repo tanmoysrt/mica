@@ -49,7 +49,7 @@ pub fn validate_chunk_size(chunk_size: u64) -> Result<()> {
 impl Manifest {
     pub fn empty(disk_id: &str, disk_size: u64, chunk_size: u64) -> Result<Self> {
         validate_chunk_size(chunk_size)?;
-        let disk_size = round_up(disk_size, chunk_size);
+        let disk_size = checked_size(disk_size, chunk_size)?;
         Ok(Self {
             disk_id: disk_id.to_string(),
             chunk_size,
@@ -97,7 +97,7 @@ impl Manifest {
     /// Adds zero chunks at the end. It never removes chunks. The last page
     /// already holds zeros past the old end, so it does not change.
     pub fn grow_to(&mut self, disk_size: u64) -> Result<()> {
-        let disk_size = round_up(disk_size, self.chunk_size);
+        let disk_size = checked_size(disk_size, self.chunk_size)?;
         ensure!(disk_size >= self.disk_size, "a disk cannot be made smaller");
         self.disk_size = disk_size;
         self.pages.resize(page_count(self.chunk_count()), None);
@@ -201,9 +201,13 @@ pub fn page_count(chunks: usize) -> usize {
     chunks.div_ceil(CHUNKS_PER_PAGE)
 }
 
-pub fn round_up(size: u64, chunk_size: u64) -> u64 {
-    size.div_ceil(chunk_size) * chunk_size
+fn checked_size(size: u64, chunk_size: u64) -> Result<u64> {
+    ensure!(size > 0, "disk size must be more than zero");
+    let chunks = size.div_ceil(chunk_size);
+    ensure!(chunks <= u32::MAX as u64, "disk size exceeds the chunk-index limit");
+    chunks.checked_mul(chunk_size).ok_or_else(|| anyhow!("disk size is too large"))
 }
+
 
 pub fn unix_now() -> u64 {
     std::time::SystemTime::now()

@@ -5,7 +5,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Each data file covers this much of the disk. A sync of one file does not
 /// wait for writes to the others, and each file stays small enough for the
@@ -32,10 +32,11 @@ const OLD_LAYOUT: [&str; 3] = ["chunk", "frozen", "tmp"];
 ///   wrote during the checkpoint that uploads them, at their disk offset:
 ///   the source if a GC deleted an upload. Never trusted after a crash.
 ///
-/// No file is made or renamed after the open, so FLUSH never syncs the folder.
+/// Only online growth adds data files after open; FLUSH never syncs the folder.
 pub struct LocalData {
     chunk_size: u64,
-    segments: Vec<Arc<File>>,
+    segments: RwLock<Vec<Arc<File>>>,
+    dir: std::path::PathBuf,
     hold: File,
     log: DirtyLog,
     /// True when every range of a chunk without local data is a hole, so a
@@ -76,9 +77,29 @@ impl LocalData {
             File::open(dir)?.sync_all()?;
         }
         let listed: BTreeSet<usize> = entries.into_iter().filter(|index| *index < chunks).collect();
-        let mut data = Self { chunk_size, segments, hold, log, holes: true };
+        let mut data = Self { chunk_size, segments: RwLock::new(segments), dir: dir.to_path_buf(), hold, log, holes: true };
         data.holes = data.clear_unlisted(&found, &listed)?;
         Ok((data, listed.into_iter().collect()))
+    }
+
+    pub fn grow_to(&self, size: u64) -> Result<()> {
+        let mut segments = self.segments.write().unwrap();
+        for segment in 0..size.div_ceil(SEGMENT_BYTES) as usize {
+            let len = SEGMENT_BYTES.min(size - segment as u64 * SEGMENT_BYTES);
+            if segment == segments.len() {
+                let file = OpenOptions::new().read(true).write(true).create(true).truncate(false)
+                    .open(self.dir.join(format!("data-{segment:05}")))?;
+                segments.push(Arc::new(file));
+            }
+            if segments[segment].metadata()?.len() < len {
+                segments[segment].set_len(len)?;
+                segments[segment].sync_all()?;
+            }
+        }
+        self.hold.set_len(size)?;
+        self.log.state.lock().unwrap().recent.grow_to((size / self.chunk_size) as usize)?;
+        File::open(&self.dir)?.sync_all()?;
+        Ok(())
     }
 
     /// Punches out the ranges of chunks that no log lists: after a crash
@@ -86,7 +107,7 @@ impl LocalData {
     /// holes already. False when the filesystem cannot punch holes.
     fn clear_unlisted(&self, found: &[bool], listed: &BTreeSet<usize>) -> Result<bool> {
         let chunks_per_segment = SEGMENT_BYTES / self.chunk_size;
-        for (segment, file) in self.segments.iter().enumerate() {
+        for (segment, file) in self.segments.read().unwrap().iter().enumerate() {
             if !found[segment] {
                 continue;
             }
@@ -111,9 +132,9 @@ impl LocalData {
     }
 
     /// The data file of a chunk, and the chunk's offset in it.
-    pub fn location(&self, index: usize) -> (&Arc<File>, u64) {
+    pub fn location(&self, index: usize) -> (Arc<File>, u64) {
         let offset = index as u64 * self.chunk_size;
-        (&self.segments[(offset / SEGMENT_BYTES) as usize], offset % SEGMENT_BYTES)
+        (self.segment((offset / SEGMENT_BYTES) as usize), offset % SEGMENT_BYTES)
     }
 
     pub fn segment_of(&self, index: usize) -> usize {
@@ -121,13 +142,14 @@ impl LocalData {
     }
 
     pub fn segment(&self, segment: usize) -> Arc<File> {
-        self.segments[segment].clone()
+        self.segments.read().unwrap()[segment].clone()
     }
 
     /// Starts writeback of a data file's dirty pages, without waiting.
     /// It reports no writeback error: only the FLUSH sync checks those.
     pub fn start_writeback(&self, segment: usize) -> Result<()> {
-        let fd = self.segments[segment].as_raw_fd();
+        let file = self.segment(segment);
+        let fd = file.as_raw_fd();
         if unsafe { libc::sync_file_range(fd, 0, 0, libc::SYNC_FILE_RANGE_WRITE) } != 0 {
             return Err(std::io::Error::last_os_error().into());
         }
@@ -145,13 +167,13 @@ impl LocalData {
     /// on btrfs and XFS, a copy elsewhere.
     pub fn copy_in(&self, index: usize, source: &File) -> Result<()> {
         let (file, offset) = self.location(index);
-        copy_range(source, 0, file, offset, self.chunk_size)
+        copy_range(source, 0, &file, offset, self.chunk_size)
     }
 
     /// Makes a chunk all zeros, and frees its space where the filesystem can.
     pub fn zero(&self, index: usize) -> Result<()> {
         let (file, offset) = self.location(index);
-        if !punch(file, offset, self.chunk_size)? {
+        if !punch(&file, offset, self.chunk_size)? {
             file.write_all_at(&vec![0u8; self.chunk_size as usize], offset)?;
         }
         Ok(())
@@ -161,7 +183,7 @@ impl LocalData {
     pub fn hold(&self, index: usize) -> Result<()> {
         let (file, offset) = self.location(index);
         let start = index as u64 * self.chunk_size;
-        copy_range(file, offset, &self.hold, start, self.chunk_size)
+        copy_range(&file, offset, &self.hold, start, self.chunk_size)
     }
 
     pub fn read_held(&self, index: usize) -> Result<Vec<u8>> {
@@ -181,7 +203,7 @@ impl LocalData {
     /// Copies a chunk into `target`, such as a new cache file.
     pub fn copy_out(&self, index: usize, target: &File) -> Result<()> {
         let (file, offset) = self.location(index);
-        copy_range(file, offset, target, 0, self.chunk_size)?;
+        copy_range(&file, offset, target, 0, self.chunk_size)?;
         target.set_len(self.chunk_size)?;
         Ok(())
     }
@@ -464,8 +486,10 @@ impl RecentMap {
             std::fs::create_dir_all(parent)?;
         }
         let file = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path)?;
-        let trusted = from_this_boot && !new_folder && file.metadata()?.len() == len as u64;
-        if !trusted {
+        let trusted = from_this_boot && !new_folder && file.metadata()?.len() >= RECENT_HEADER as u64;
+        if trusted {
+            file.set_len(file.metadata()?.len().max(len as u64))?;
+        } else {
             file.set_len(0)?;
             file.set_len(len as u64)?;
             file.write_all_at(format!("{}/{}", boot_id(), random_id()).as_bytes(), 0)?;
@@ -479,6 +503,23 @@ impl RecentMap {
         let found = trusted.then(|| (0..chunks).filter(|&index| recent.contains(index)).collect());
         Ok((recent, found))
     }
+    fn grow_to(&mut self, chunks: usize) -> Result<()> {
+        let len = RECENT_HEADER + chunks.div_ceil(64) * 8;
+        if len <= self.len {
+            return Ok(());
+        }
+        self._file.set_len(len as u64)?;
+        let map = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED, self._file.as_raw_fd(), 0) };
+        if map == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error()).context("grow recent bitmap");
+        }
+        unsafe { libc::munmap(self.map.cast(), self.len) };
+        self.map = map.cast();
+        self.len = len;
+        Ok(())
+    }
+
     fn words(&self) -> &[AtomicU64] {
         let count = (self.len - RECENT_HEADER) / 8;
         unsafe { std::slice::from_raw_parts(self.map.add(RECENT_HEADER).cast::<AtomicU64>(), count) }
@@ -708,6 +749,35 @@ mod tests {
         assert_eq!(listed, vec![3]);
         assert_eq!(data.read_chunk(2).unwrap(), vec![0u8; CHUNK as usize]);
         assert_eq!(data.read_chunk(3).unwrap(), vec![8u8; CHUNK as usize]);
+    }
+
+    #[test]
+    fn growing_recent_bitmap_preserves_unflushed_chunks_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = dir.path().join("run/recent");
+        let (data, _) = LocalData::open(dir.path(), &session, 64 * CHUNK, CHUNK).unwrap();
+        data.location(3).0.write_all_at(&[7; CHUNK as usize], 3 * CHUNK).unwrap();
+        data.log().note_write(3).unwrap();
+        data.grow_to(256 * CHUNK).unwrap();
+        data.location(200).0.write_all_at(&[8; CHUNK as usize], 200 * CHUNK).unwrap();
+        data.log().note_write(200).unwrap();
+        drop(data);
+        let (data, listed) = LocalData::open(dir.path(), &session, 256 * CHUNK, CHUNK).unwrap();
+        assert_eq!(listed, vec![3, 200]);
+        assert_eq!(data.read_chunk(3).unwrap(), vec![7; CHUNK as usize]);
+        assert_eq!(data.read_chunk(200).unwrap(), vec![8; CHUNK as usize]);
+    }
+
+    #[test]
+    fn interrupted_growth_keeps_recent_bits_when_root_is_still_small() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = dir.path().join("run/recent");
+        let (data, _) = LocalData::open(dir.path(), &session, 64 * CHUNK, CHUNK).unwrap();
+        data.log().note_write(3).unwrap();
+        data.grow_to(256 * CHUNK).unwrap();
+        drop(data);
+        let (_, listed) = LocalData::open(dir.path(), &session, 64 * CHUNK, CHUNK).unwrap();
+        assert_eq!(listed, vec![3]);
     }
 
     #[test]

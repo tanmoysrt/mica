@@ -56,6 +56,8 @@ sudo ~/.cargo/bin/mica service setup --use-config-file
 socket = "/run/mica.sock"
 data_dir = "/var/lib/mica"
 cache_limit_gib = 50
+disk_cache_limit_mib = 1024
+local_reserve_mib = 1024
 dirty_limit_gib = 20
 checkpoint_interval_secs = 30
 checkpoint_after_mib = 512
@@ -82,7 +84,9 @@ conditional_writes = false
 |---|---|---|
 | `socket` | `/run/mica.sock` | The daemon's Unix socket |
 | `data_dir` | `/var/lib/mica` | Local chunks, cache and state. Cache and dirty chunks must be on one filesystem. |
-| `cache_limit_gib` | 50 | Clean chunk cache, shared by all disks of the node |
+| `cache_limit_gib` | 50 | Host safeguard for total clean-cache data |
+| `disk_cache_limit_mib` | 1024 | Default clean cache per disk, overridden by `--cache-size` |
+| `local_reserve_mib` | 1024 | Filesystem headroom; reclaim cache and pause writes below this |
 | `dirty_limit_gib` | 20 | Local data not yet in S3, **for each attached disk**. At half, a checkpoint starts early; at the limit, writes wait. |
 | `checkpoint_interval_secs` | 30 | Time between checkpoints of a busy disk. Keep it well below `max_unsaved_minutes`. |
 | `checkpoint_after_mib` | 512 | A checkpoint also starts when this much local data is not in S3. So uploads run while the guest writes, and a detach has little left to upload. |
@@ -240,3 +244,13 @@ sudo mica service uninstall --purge  # removes them too
 ```
 
 It refuses while any disk is attached, mounted by mica, or has local data that may not be in S3.
+
+## Per-disk storage budgets
+
+A disk can expose 50 GiB while retaining only 500 MiB of clean data locally: `mica disk create small-cache --size 50G --cache-size 500M --dirty-size 256M`. Reads outside its cache download from S3. The provisioned size bounds block I/O; there is no separate maximum-size setting.
+
+Clean caches are independent per disk. This makes accounting and eviction predictable, at the cost of storing duplicate clean chunks locally when disks share an image. S3 chunks and metadata pages remain shared. Explicit limits live in the disk head; disks without explicit limits use `disk_cache_limit_mib` and `dirty_limit_gib` on the current node. Clones use their own supplied limits or node defaults.
+
+After committing writes, mica copies saved chunks to that disk's clean cache, removes them from the dirty log, and frees their data-file ranges. A reconciler runs every second to trim caches, retry reclamation, and request checkpoints under space pressure. `cache_limit_gib` is the aggregate host safeguard. `local_reserve_mib` is free filesystem space to preserve; if clean-cache eviction cannot restore it, new writes wait while checkpointing continues. This is a periodic safeguard, not a filesystem quota: in-flight I/O, metadata, checkpoint copies, open evicted files, and other applications can consume additional space.
+
+Upgrading does not change the root, page, chunk, or dirty-log formats. Existing heads without limits use the new per-disk default of 1 GiB. The old shared `cache/` remains disposable and is included in host accounting and `mica cache prune`; new reads populate `disk-cache/<disk>/`. Set per-disk limits explicitly before moving to a host whose defaults differ.

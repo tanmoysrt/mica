@@ -31,11 +31,18 @@ pub fn print_status(status: &Value) {
                 disk["device"].as_str().unwrap_or("-").to_string(),
                 bytes(details["size"].as_u64().unwrap_or(0)),
                 bytes(details["unsaved_bytes"].as_u64().unwrap_or(0)),
+                format!("{}/{}", bytes(details["cache_bytes"].as_u64().unwrap_or(0)), bytes(details["cache_limit_bytes"].as_u64().unwrap_or(0))),
+                bytes(details["dirty_limit_bytes"].as_u64().unwrap_or(0)),
                 note(details),
             ]
         })
         .collect();
-    print_table(&["DISK", "STATE", "DEVICE", "SIZE", "NOT IN S3", "NOTE"], &rows);
+    print_table(&["DISK", "STATE", "DEVICE", "SIZE", "NOT IN S3", "CACHE USED/LIMIT", "DIRTY LIMIT", "NOTE"], &rows);
+    if let Some(recovering) = status["recovering"].as_array() {
+        for disk in recovering {
+            println!("{}: recovering; pending I/O stays paused", text(disk));
+        }
+    }
     print_request_counts(&status["s3"]);
 }
 

@@ -1,6 +1,6 @@
 use crate::bucket::Bucket;
 use crate::catalog::{Catalog, LoadedDisk, validate_name};
-use crate::chunk_cache::ChunkCache;
+use crate::cache_manager::CacheManager;
 use crate::config::Config;
 use crate::local_data::LocalData;
 use crate::gc::GarbageCollector;
@@ -30,7 +30,7 @@ pub struct Daemon {
     pub(crate) config: Config,
     pub(crate) config_path: PathBuf,
     pub(crate) bucket: Arc<Bucket>,
-    cache: Arc<ChunkCache>,
+    pub(crate) cache: Arc<CacheManager>,
     page_store: Arc<PageStore>,
     pub(crate) node: Arc<NodeIdentity>,
     pub(crate) disks: Mutex<HashMap<String, AttachedDisk>>,
@@ -38,6 +38,7 @@ pub struct Daemon {
     /// locked only for short updates, so other disks attach in parallel.
     disk_locks: std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>,
     gc_running: Mutex<()>,
+    pub(crate) recovering: Mutex<HashSet<String>>,
 }
 
 /// Prefetch for one attach. `None` fields take the config defaults.
@@ -70,7 +71,8 @@ impl Daemon {
     pub async fn start(config: Config, config_path: PathBuf) -> Result<Arc<Self>> {
         crate::local_data::create_dir_durable(&config.data_dir)?;
         let bucket = Arc::new(Bucket::connect(&config.s3)?);
-        let cache = ChunkCache::load(config.data_dir.join("cache"), config.cache_limit_bytes(), bucket.clone())?;
+        let cache = CacheManager::load(config.data_dir.clone(), bucket.clone(), config.cache_limit_bytes(), config.local_reserve_mib << 20)?;
+        cache.reconcile()?;
         let page_store = Arc::new(PageStore::new(config.data_dir.join("pages"), bucket.clone())?);
         let node = Arc::new(NodeIdentity::load_or_create(&config.data_dir)?);
         log::info!("node {} (id {})", node.hostname, node.id);
@@ -84,8 +86,10 @@ impl Daemon {
             disks: Mutex::default(),
             disk_locks: std::sync::Mutex::default(),
             gc_running: Mutex::default(),
+            recovering: Mutex::default(),
         });
         daemon.recover_disks().await?;
+        tokio::spawn(daemon.clone().reconcile_storage());
         Ok(daemon)
     }
 
@@ -108,6 +112,9 @@ impl Daemon {
             }
             tokio::time::sleep(DRAIN_POLL).await;
         }
+        if self.recovering.lock().await.contains(disk_id) {
+            bail!("disk {disk_id} is recovering; try again after recovery finishes");
+        }
         let mut timings = Timings::start();
         // Claim first, then load: a head loaded before the claim could be
         // replaced by the final commit of the previous owner. The load runs
@@ -129,7 +136,7 @@ impl Daemon {
         Ok(result)
     }
 
-    fn disk_lock(&self, disk_id: &str) -> Arc<Mutex<()>> {
+    pub(crate) fn disk_lock(&self, disk_id: &str) -> Arc<Mutex<()>> {
         self.disk_locks.lock().unwrap().entry(disk_id.to_string()).or_default().clone()
     }
 
@@ -185,10 +192,12 @@ impl Daemon {
         // In disk order, each chunk once: a boot reads the start of a disk first.
         let mut seen = HashSet::new();
         let hashes: Vec<ContentHash> = chunks.into_iter().flatten().filter(|hash| seen.insert(*hash)).collect();
-        let missing: Vec<ContentHash> = hashes.iter().filter(|hash| !self.cache.has(hash)).copied().collect();
+        let limits = self.catalog().load(disk_id).await?.head.limits;
+        let cache = self.disk_cache(disk_id, limits.cache_bytes).await?;
+        let missing: Vec<ContentHash> = hashes.iter().filter(|hash| !cache.has(hash)).copied().collect();
         let results: Vec<bool> = futures::stream::iter(missing)
             .map(|hash| {
-                let cache = self.cache.clone();
+                let cache = cache.clone();
                 async move { cache.open(&hash).await.is_ok() }
             })
             .buffer_unordered(parallel.unwrap_or(DEFAULT_WARM_PARALLEL).max(1))
@@ -201,7 +210,7 @@ impl Daemon {
             "failed": results.len() - downloaded,
             "downloaded_bytes": downloaded as u64 * chunk_size,
             "disk_bytes": hashes.len() as u64 * chunk_size,
-            "cache_limit_bytes": self.cache.limit_bytes(),
+            "cache_limit_bytes": cache.limit_bytes(),
         }))
     }
 
@@ -234,7 +243,8 @@ impl Daemon {
         if !delete {
             return Ok(json!({ "usage": usage }));
         }
-        let (chunks, bytes) = self.cache.prune(&in_use);
+        let cache = self.cache.clone();
+        let (chunks, bytes) = crate::blocking::blocking(move || Ok(cache.prune(&in_use))).await?;
         log::info!("cache: pruned {chunks} chunks");
         Ok(json!({ "usage": usage, "deleted_chunks": chunks, "deleted_bytes": bytes }))
     }
@@ -288,6 +298,7 @@ impl Daemon {
         json!({
             "node": self.node.hostname,
             "node_id": self.node.id,
+            "recovering": self.recovering.lock().await.iter().cloned().collect::<Vec<_>>(),
             "disks": list,
             "s3": self.bucket.request_counts(),
         })
@@ -344,12 +355,13 @@ impl Daemon {
     }
 
     async fn disk_from(&self, disk_id: &str, folder: &DiskFolder, loaded: LoadedDisk) -> Result<Disk> {
-        let (data, listed) = LocalData::open(
-            &folder.dirty_path(),
-            &folder.recent_path(),
-            loaded.manifest.disk_size,
-            loaded.manifest.chunk_size,
-        )?;
+        let (dirty, recent) = (folder.dirty_path(), folder.recent_path());
+        let (size, chunk_size) = (loaded.manifest.disk_size, loaded.manifest.chunk_size);
+        crate::disk_limits::DiskLimits {
+            cache_bytes: Some(loaded.head.limits.cache_bytes.unwrap_or(self.config.disk_cache_limit_mib << 20)),
+            dirty_bytes: Some(loaded.head.limits.dirty_bytes.unwrap_or(self.config.dirty_limit_bytes())),
+        }.validate(chunk_size)?;
+        let (data, listed) = crate::blocking::blocking(move || LocalData::open(&dirty, &recent, size, chunk_size)).await?;
         Disk::open(DiskParts {
             disk_id: disk_id.to_string(),
             data,
@@ -357,11 +369,13 @@ impl Daemon {
             manifest: loaded.manifest,
             manifest_hash: loaded.manifest_hash,
             profile: loaded.head.profile,
-            cache: self.cache.clone(),
+            cache: self.disk_cache(disk_id, loaded.head.limits.cache_bytes).await?,
             page_store: self.page_store.clone(),
             bucket: self.bucket.clone(),
             node: self.node.clone(),
-            dirty_limit_bytes: self.config.dirty_limit_bytes(),
+            dirty_limit_bytes: loaded.head.limits.dirty_bytes.unwrap_or(self.config.dirty_limit_bytes()),
+            limits: loaded.head.limits,
+            host_pressure: self.cache.pressure.clone(),
             checkpoint_after_bytes: self.config.checkpoint_after_mib << 20,
             max_unsaved_age: Duration::from_secs(self.config.max_unsaved_minutes * 60),
             wait_when_behind: self.config.wait_when_behind,
@@ -509,5 +523,20 @@ impl Timings {
         }
         map.insert("total".to_string(), json!(self.started.elapsed().as_secs_f64() * 1000.0));
         Value::Object(map)
+    }
+}
+
+#[cfg(test)]
+impl Daemon {
+    pub(crate) fn test_daemon(root: &std::path::Path, bucket: Arc<Bucket>, node_id: &str) -> Self {
+        let config = Config { data_dir: root.into(), local_reserve_mib: 0, ..Default::default() };
+        Self {
+            config_path: root.join("config.toml"),
+            cache: Arc::new(CacheManager::load(root.into(), bucket.clone(), 1 << 20, 0).unwrap()),
+            page_store: Arc::new(PageStore::new(root.join("pages"), bucket.clone()).unwrap()),
+            node: Arc::new(NodeIdentity { id: node_id.into(), hostname: node_id.into() }),
+            config, bucket, disks: Mutex::default(), disk_locks: std::sync::Mutex::default(),
+            gc_running: Mutex::default(), recovering: Mutex::default(),
+        }
     }
 }

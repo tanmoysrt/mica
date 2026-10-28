@@ -10,12 +10,13 @@ use crate::prefetch::ReadAhead;
 use crate::read_profile::ReadProfile;
 use anyhow::{Result, bail};
 use serde::Serialize;
+use futures::{StreamExt, TryStreamExt};
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fs::File;
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::{Notify, OnceCell};
@@ -30,20 +31,22 @@ const HELD_IN_MEMORY: u64 = 64 << 20;
 /// then write all of them.
 const WRITEBACK_AFTER: u64 = 16 << 20;
 
-/// One attached disk. It turns block reads and writes into chunk operations.
-/// It knows nothing about ublk.
+type ChunkSlots = Box<[Arc<tokio::sync::Mutex<ChunkSlot>>]>;
+type SlotPage = Arc<OnceCell<ChunkSlots>>;
+
+/// One attached disk, independent of the kernel block-device interface.
 pub struct Disk {
     pub id: String,
-    pub size: u64,
+    pub(crate) size: AtomicU64,
     pub(crate) chunk_size: u64,
     /// The chunk slots of each metadata page, made on first use. A disk
     /// costs memory only for the parts that the guest uses.
-    pages: Vec<OnceCell<Box<[tokio::sync::Mutex<ChunkSlot>]>>>,
+    pub(crate) pages: RwLock<Vec<SlotPage>>,
     /// Chunks whose local content may not be in S3: the work of the next checkpoint.
     pub(crate) unsaved: Arc<Mutex<BTreeSet<usize>>>,
     pub(crate) unsaved_chunks: AtomicUsize,
-    /// Chunks with local data that S3 has, oldest save first. When local
-    /// data is over its limit, the oldest ones leave the data files.
+    /// Chunks queued for eviction, oldest entry first. Each chunk has at
+    /// most one entry, even if it is written and saved again.
     pub(crate) saved_local: Mutex<VecDeque<usize>>,
     /// Chunks that left the data files, whose space is not freed yet: a
     /// FLUSH was adding them to the log. The next free tries again.
@@ -79,7 +82,9 @@ pub struct Disk {
     /// that left the data files is freed after the reads that may use it end.
     read_epoch: AtomicU64,
     readers: [AtomicUsize; 2],
-    local_chunk_limit: usize,
+    pub(crate) local_chunk_limit: AtomicUsize,
+    pub(crate) limits: Mutex<crate::disk_limits::DiskLimits>,
+    host_pressure: Arc<AtomicBool>,
     /// A checkpoint starts early at this many unsaved chunks.
     checkpoint_after_chunks: usize,
     pub(crate) space_freed: Notify,
@@ -99,6 +104,7 @@ pub struct Disk {
 /// else `base` (in S3), else zeros.
 pub(crate) struct ChunkSlot {
     pub base: Option<ContentHash>,
+    pub queued_for_eviction: bool,
     /// The data files hold the chunk's current content.
     pub local: bool,
     /// The local content may differ from `base`.
@@ -147,6 +153,8 @@ pub struct DiskParts {
     pub bucket: Arc<Bucket>,
     pub node: Arc<NodeIdentity>,
     pub dirty_limit_bytes: u64,
+    pub limits: crate::disk_limits::DiskLimits,
+    pub host_pressure: Arc<AtomicBool>,
     pub checkpoint_after_bytes: u64,
     pub max_unsaved_age: Duration,
     pub wait_when_behind: bool,
@@ -161,6 +169,9 @@ pub struct DiskStatus {
     pub behind: bool,
     pub ownership_lost: bool,
     pub sync_failed: bool,
+    pub cache_bytes: u64,
+    pub cache_limit_bytes: u64,
+    pub dirty_limit_bytes: u64,
 }
 
 /// The part of a request that falls in one chunk.
@@ -194,13 +205,13 @@ impl Disk {
     pub async fn open(parts: DiskParts) -> Result<Self> {
         let manifest = parts.manifest;
         let chunk_size = manifest.chunk_size;
-        let pages = (0..manifest.pages.len()).map(|_| OnceCell::new()).collect();
+        let pages = (0..manifest.pages.len()).map(|_| Arc::new(OnceCell::new())).collect();
         let (fetches, fetch_queue) = unbounded_channel();
         let disk = Self {
             id: parts.disk_id,
-            size: manifest.disk_size,
+            size: AtomicU64::new(manifest.disk_size),
             chunk_size,
-            pages,
+            pages: RwLock::new(pages),
             unsaved: Arc::default(),
             unsaved_chunks: AtomicUsize::new(0),
             saved_local: Mutex::default(),
@@ -232,7 +243,9 @@ impl Disk {
             flushing: tokio::sync::Mutex::new(()),
             read_epoch: AtomicU64::new(0),
             readers: [AtomicUsize::new(0), AtomicUsize::new(0)],
-            local_chunk_limit: (parts.dirty_limit_bytes / chunk_size).max(2) as usize,
+            local_chunk_limit: AtomicUsize::new((parts.dirty_limit_bytes / chunk_size).max(2) as usize),
+            limits: Mutex::new(parts.limits),
+            host_pressure: parts.host_pressure,
             checkpoint_after_chunks: (parts.checkpoint_after_bytes / chunk_size).max(1) as usize,
             space_freed: Notify::new(),
             checkpoint_wanted: Notify::new(),
@@ -260,7 +273,7 @@ impl Disk {
         if index >= self.chunk_count() {
             bail!("local chunk {index} is outside the disk");
         }
-        let mut slot = self.slot(index).await?.lock().await;
+        let mut slot = self.slot(index).await?.lock_owned().await;
         slot.local = true;
         slot.unsaved = true;
         slot.verify = true;
@@ -272,35 +285,39 @@ impl Disk {
         Ok(())
     }
 
+    pub fn size(&self) -> u64 {
+        self.size.load(Ordering::Acquire)
+    }
+
     pub fn chunk_count(&self) -> usize {
-        (self.size / self.chunk_size) as usize
+        (self.size() / self.chunk_size) as usize
     }
 
-    /// The slot of a chunk. Loads its metadata page first if needed.
-    pub(crate) async fn slot(&self, index: usize) -> Result<&tokio::sync::Mutex<ChunkSlot>> {
+    pub(crate) async fn slot(&self, index: usize) -> Result<Arc<tokio::sync::Mutex<ChunkSlot>>> {
         let page = index / CHUNKS_PER_PAGE;
-        let slots = self.pages[page].get_or_try_init(|| self.load_page(page)).await?;
-        Ok(&slots[index % CHUNKS_PER_PAGE])
+        let cell = self.pages.read().unwrap()[page].clone();
+        let slots = cell.get_or_try_init(|| self.load_page(page)).await?;
+        Ok(slots[index % CHUNKS_PER_PAGE].clone())
     }
 
-    /// The slot of a chunk whose page is loaded already. Never waits, so the
-    /// ublk queue thread can call it.
-    pub(crate) fn loaded_slot(&self, index: usize) -> Option<&tokio::sync::Mutex<ChunkSlot>> {
-        let slots = self.pages[index / CHUNKS_PER_PAGE].get()?;
-        Some(&slots[index % CHUNKS_PER_PAGE])
+    pub(crate) fn loaded_slot(&self, index: usize) -> Option<Arc<tokio::sync::Mutex<ChunkSlot>>> {
+        let pages = self.pages.read().unwrap();
+        let slots = pages.get(index / CHUNKS_PER_PAGE)?.get()?;
+        Some(slots[index % CHUNKS_PER_PAGE].clone())
     }
 
     /// A page that is not loaded has no local chunks, so its slots come from
     /// the committed root alone.
-    async fn load_page(&self, page: usize) -> Result<Box<[tokio::sync::Mutex<ChunkSlot>]>> {
+    async fn load_page(&self, page: usize) -> Result<ChunkSlots> {
         let hash = self.committed.lock().unwrap().manifest.pages[page];
         let chunks = self.page_store.get_or_zero(hash.as_ref()).await?;
         Ok(chunks
             .chunks
             .iter()
             .map(|base| {
-                tokio::sync::Mutex::new(ChunkSlot {
+                Arc::new(tokio::sync::Mutex::new(ChunkSlot {
                     base: *base,
+                    queued_for_eviction: false,
                     local: false,
                     unsaved: false,
                     staged: false,
@@ -310,7 +327,7 @@ impl Disk {
                     confirm: false,
                     verify: false,
                     written: None,
-                })
+                }))
             })
             .collect())
     }
@@ -326,7 +343,7 @@ impl Disk {
         let mut cached = Vec::new();
         for part in self.split(offset, len)? {
             self.profile.record(part.index);
-            let slot = self.slot(part.index).await?.lock().await;
+            let slot = self.slot(part.index).await?.lock_owned().await;
             if slot.local {
                 let (file, start) = self.data.location(part.index);
                 local.push((part, file.clone(), start));
@@ -345,10 +362,16 @@ impl Disk {
         drop(pass);
         // A write meanwhile makes the chunk local, but the cache still has
         // the content from before it: a read that races a write may see either.
-        for (part, hash) in cached {
-            let file = self.cache.open(&hash).await?;
+        let cached: Vec<_> = futures::stream::iter(cached)
+            .map(|(part, hash)| async move { Ok::<_, anyhow::Error>((part, self.cache.open(&hash).await?)) })
+            .buffer_unordered(16)
+            .try_collect()
+            .await?;
+        if !cached.is_empty() {
             data = blocking(move || {
-                file.read_exact_at(&mut data[part.buffer], part.offset)?;
+                for (part, file) in cached {
+                    file.read_exact_at(&mut data[part.buffer], part.offset)?;
+                }
                 Ok(data)
             })
             .await?;
@@ -395,7 +418,7 @@ impl Disk {
     /// Returns the chunks it wrote.
     async fn write_parts(&self, offset: u64, data: Vec<u8>) -> Result<BTreeSet<usize>> {
         self.ensure_usable()?;
-        self.wait_for_room().await;
+        self.wait_for_room().await?;
         let data = Arc::new(data);
         let mut chunks = BTreeSet::new();
         for part in self.split(offset, data.len())? {
@@ -414,7 +437,7 @@ impl Disk {
         self.ensure_usable()?;
         for part in self.split(offset, len as usize)? {
             if part.buffer.len() as u64 == self.chunk_size {
-                self.wait_for_room().await;
+                self.wait_for_room().await?;
                 self.zero_whole_chunk(part.index).await?;
                 self.note_unsaved_write();
             }
@@ -425,7 +448,7 @@ impl Disk {
     /// Unlike a discard, write-zeroes must zero every byte.
     pub async fn write_zeroes(&self, offset: u64, len: u64) -> Result<()> {
         self.ensure_usable()?;
-        self.wait_for_room().await;
+        self.wait_for_room().await?;
         for part in self.split(offset, len as usize)? {
             if part.buffer.len() as u64 == self.chunk_size {
                 self.zero_whole_chunk(part.index).await?;
@@ -522,7 +545,7 @@ impl Disk {
     /// in the cache. False also when its page is not loaded yet.
     pub(crate) fn is_local(&self, index: usize) -> bool {
         let Some(slot) = self.loaded_slot(index) else { return false };
-        let Ok(slot) = slot.try_lock() else { return false };
+        let Ok(slot) = slot.try_lock_owned() else { return false };
         slot.local || slot.base.is_none_or(|hash| self.cache.has(&hash))
     }
 
@@ -537,7 +560,7 @@ impl Disk {
             if index >= self.chunk_count() || self.is_closed() {
                 return Ok(());
             }
-            let slot = self.slot(index).await?.lock().await;
+            let slot = self.slot(index).await?.lock_owned().await;
             if slot.local {
                 return Ok(());
             }
@@ -552,7 +575,10 @@ impl Disk {
     pub fn status(&self) -> DiskStatus {
         let behind = self.is_behind();
         DiskStatus {
-            size: self.size,
+            size: self.size(),
+            cache_bytes: self.cache.bytes(),
+            cache_limit_bytes: self.cache.limit_bytes(),
+            dirty_limit_bytes: self.local_chunk_limit.load(Ordering::Relaxed) as u64 * self.chunk_size,
             seq: self.committed.lock().unwrap().manifest.seq,
             local_chunks: self.local_chunks.load(Ordering::SeqCst),
             unsaved_bytes: self.unsaved_chunks.load(Ordering::SeqCst) as u64 * self.chunk_size,
@@ -608,6 +634,7 @@ impl Disk {
     /// Stops the disk for good after a failed sync. See `sync_failed`.
     pub(crate) fn fail_sync(&self, error: &anyhow::Error) {
         self.sync_failed.store(true, Ordering::SeqCst);
+        self.space_freed.notify_waiters();
         log::error!("disk {}: local sync failed, the disk is stopped: {error:#}", self.id);
     }
 
@@ -621,7 +648,7 @@ impl Disk {
     /// the chunk while the write is still going into it.
     async fn write_part(&self, part: ChunkPart, data: Arc<Vec<u8>>) -> Result<()> {
         let index = part.index;
-        let mut slot = self.slot(index).await?.lock().await;
+        let mut slot = self.slot(index).await?.lock_owned().await;
         let whole_chunk = part.buffer.len() as u64 == self.chunk_size;
         if !slot.local {
             // A whole-chunk write replaces all of it: nothing to put in first.
@@ -728,7 +755,7 @@ impl Disk {
     }
 
     async fn zero_whole_chunk(&self, index: usize) -> Result<()> {
-        let mut slot = self.slot(index).await?.lock().await;
+        let mut slot = self.slot(index).await?.lock_owned().await;
         if !slot.local && slot.base.is_none() {
             return Ok(());
         }
@@ -744,20 +771,20 @@ impl Disk {
 
     fn unsaved_chunk_added(&self) {
         let count = self.unsaved_chunks.fetch_add(1, Ordering::SeqCst) + 1;
-        if count >= self.checkpoint_after_chunks.min(self.local_chunk_limit / 2) {
+        if count >= self.checkpoint_after_chunks.min(self.local_chunk_limit.load(Ordering::Relaxed) / 2) {
             self.checkpoint_wanted.notify_one();
         }
     }
 
-    /// Frees the data of saved chunks, oldest save first, while local data
-    /// is over its limit. Each goes into the cache first. Then the dirty log
+    /// Frees saved chunks after copying them to the clean cache. The dirty log
     /// drops them: a crash must not bring them back as local. Their space
     /// is freed after the reads that may still use it end.
     pub(crate) async fn free_saved_chunks(&self) -> Result<()> {
         let mut freed = std::mem::take(&mut *self.unpunched.lock().unwrap());
-        while self.local_chunks.load(Ordering::SeqCst) > self.local_chunk_limit {
+        while self.local_chunks.load(Ordering::SeqCst) > 0 {
             let Some(index) = self.saved_local.lock().unwrap().pop_front() else { break };
-            let mut slot = self.slot(index).await?.lock().await;
+            let mut slot = self.slot(index).await?.lock_owned().await;
+            slot.queued_for_eviction = false;
             if !slot.local || slot.unsaved {
                 continue;
             }
@@ -783,7 +810,7 @@ impl Disk {
         }
         self.wait_for_reads().await;
         for index in freed {
-            let slot = self.slot(index).await?.lock().await;
+            let slot = self.slot(index).await?.lock_owned().await;
             if slot.local {
                 continue;
             }
@@ -805,7 +832,7 @@ impl Disk {
         let local: Vec<usize> = self.local_set.lock().unwrap().iter().copied().collect();
         for index in local {
             let Ok(slot) = self.slot(index).await else { continue };
-            let slot = slot.lock().await;
+            let slot = slot.lock_owned().await;
             let (Some(hash), false) = (slot.base, slot.unsaved) else { continue };
             let (data, cache) = (self.data.clone(), self.cache.clone());
             if let Err(error) = blocking(move || cache.store(&hash, |file| data.copy_out(index, file))).await {
@@ -818,11 +845,12 @@ impl Disk {
     /// `wait_when_behind`, while unsaved data is older than the limit. That
     /// makes the data-loss bound hold on a slow link. The guest sees a slow
     /// disk, not an I/O error.
-    async fn wait_for_room(&self) {
+    async fn wait_for_room(&self) -> Result<()> {
         loop {
             let freed = self.space_freed.notified();
+            self.ensure_usable()?;
             if self.has_room() {
-                return;
+                return Ok(());
             }
             self.checkpoint_wanted.notify_one();
             freed.await;
@@ -832,13 +860,13 @@ impl Disk {
     /// Unsaved data is high, or old: a background checkpoint must take all
     /// chunks, also the ones that were just written.
     pub(crate) fn under_pressure(&self) -> bool {
-        self.unsaved_chunks.load(Ordering::SeqCst) >= self.local_chunk_limit / 2 || self.is_behind()
+        self.unsaved_chunks.load(Ordering::SeqCst) >= self.local_chunk_limit.load(Ordering::Relaxed) / 2 || self.is_behind()
     }
 
     pub(crate) fn has_room(&self) -> bool {
-        let full = self.unsaved_chunks.load(Ordering::SeqCst) >= self.local_chunk_limit;
+        let full = self.unsaved_chunks.load(Ordering::SeqCst) >= self.local_chunk_limit.load(Ordering::Relaxed);
         let too_old = self.wait_when_behind && self.is_behind();
-        !full && !too_old
+        !full && !too_old && !self.host_pressure.load(Ordering::Acquire)
     }
 
     pub(crate) fn note_unsaved_write(&self) {
@@ -847,8 +875,8 @@ impl Disk {
 
     pub(crate) fn split(&self, offset: u64, len: usize) -> Result<Vec<ChunkPart>> {
         let end = offset + len as u64;
-        if end > self.size {
-            bail!("I/O at {offset}+{len} is past the end of the disk ({})", self.size);
+        if end > self.size() {
+            bail!("I/O at {offset}+{len} is past the end of the disk ({})", self.size());
         }
         let mut parts = Vec::new();
         let mut position = offset;
@@ -863,3 +891,7 @@ impl Disk {
         Ok(parts)
     }
 }
+
+#[cfg(test)]
+#[path = "disk_tests.rs"]
+mod tests;

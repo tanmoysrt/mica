@@ -1,5 +1,6 @@
 use crate::chunk_cache::Fetch;
 use crate::disk::Disk;
+use futures::StreamExt;
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -151,43 +152,36 @@ async fn fetch_all(disk: &Arc<Disk>, slots: &Arc<Semaphore>, indexes: Vec<usize>
 /// reads locally, also after the link goes away.
 async fn background_fill(disk: &Arc<Disk>, slots: &Arc<Semaphore>) {
     let started = Instant::now();
-    let chunks = match disk.committed_chunks().await {
-        Ok(chunks) => chunks,
-        Err(error) => return log::warn!("disk {}: background fill cannot read pages: {error:#}", disk.id),
-    };
-    let missing: Vec<usize> = chunks
-        .iter()
-        .enumerate()
-        .filter_map(|(index, hash)| hash.filter(|hash| !disk.cache.has(hash)).map(|_| index))
-        .collect();
-    if missing.is_empty() {
-        return;
-    }
-    let count = missing.len();
-    let mut tasks = Vec::new();
-    for index in missing {
+    let manifest = disk.committed.lock().unwrap().manifest.clone();
+    let mut downloaded = 0;
+    for hash in &manifest.pages {
         if disk.is_closed() || disk.cache.nearly_full() {
-            log::info!("disk {}: background fill stopped: the disk closed or the cache is nearly full", disk.id);
             break;
         }
-        let Ok(slot) = slots.clone().acquire_owned().await else { break };
-        let (disk, hash) = (disk.clone(), chunks[index]);
-        tasks.push(tokio::spawn(async move {
-            let _slot = slot;
-            if disk.is_closed() {
-                return;
-            }
-            if let Some(hash) = hash
-                && let Err(error) = disk.cache.fetch(&hash, Fetch::Fill).await
-            {
-                log::debug!("disk {}: background fill of chunk {index} failed: {error:#}", disk.id);
-            }
-        }));
+        let page = match disk.page_store.get_or_zero(hash.as_ref()).await {
+            Ok(page) => page,
+            Err(error) => return log::warn!("disk {}: background fill cannot read page: {error:#}", disk.id),
+        };
+        let results = futures::stream::iter(page.chunks.iter().flatten().copied())
+            .map(|hash| async move {
+                if disk.is_closed() || disk.cache.nearly_full() || disk.cache.has(&hash) {
+                    return false;
+                }
+                let Ok(_slot) = slots.acquire().await else { return false };
+                match disk.cache.fetch(&hash, Fetch::Fill).await {
+                    Ok(()) => true,
+                    Err(error) => {
+                        log::debug!("disk {}: background fill failed: {error:#}", disk.id);
+                        false
+                    }
+                }
+            })
+            .buffer_unordered((DISK_FILL_BYTES / disk.chunk_size).clamp(1, 32) as usize)
+            .fold(0, |count, fetched| async move { count + usize::from(fetched) })
+            .await;
+        downloaded += results;
     }
-    for task in tasks {
-        let _ = task.await;
-    }
-    log::info!("disk {}: background fill of {count} chunks done in {} s", disk.id, started.elapsed().as_secs());
+    log::info!("disk {}: background fill fetched {downloaded} chunks in {} s", disk.id, started.elapsed().as_secs());
 }
 
 #[cfg(test)]

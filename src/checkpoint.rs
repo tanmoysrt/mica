@@ -26,7 +26,8 @@ const REPAIR_ROUNDS: usize = 5;
 const GC_CHECK: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// A committed chunk: its index and new hash. `None` is a zero chunk.
-type Uploaded = Vec<(usize, Option<ContentHash>)>;
+type UploadedChunk = (usize, Option<ContentHash>);
+type Uploaded = Vec<UploadedChunk>;
 
 /// A chunk read for its upload.
 struct Staged {
@@ -87,7 +88,9 @@ impl Disk {
     async fn commit(&self, uploaded: &Uploaded, gc_before: GcActivity, started: Instant) -> Result<()> {
         let (manifest, manifest_hash, profile, new_pages) = self.commit_root(uploaded).await?;
         self.confirm_ownership().await?;
+        let limits = *self.limits.lock().unwrap();
         Head::new(&manifest_hash, profile.clone(), manifest.seq, &self.node.hostname)
+            .with_limits(limits)
             .save(&self.bucket, &self.id)
             .await?;
         log::info!(
@@ -123,8 +126,8 @@ impl Disk {
     async fn cold_chunks(&self, pending: Vec<usize>) -> Result<Vec<usize>> {
         let mut cold = Vec::with_capacity(pending.len());
         for index in pending {
-            let Ok(slot) = self.slot(index).await?.try_lock() else { continue };
-            if !slot.written.is_some_and(|written| written.elapsed() < HOT_CHUNK) {
+            let Ok(slot) = self.slot(index).await?.try_lock_owned() else { continue };
+            if slot.written.is_none_or(|written| written.elapsed() >= HOT_CHUNK) {
                 cold.push(index);
             }
         }
@@ -141,7 +144,7 @@ impl Disk {
         // stage of every chunk is known when it ends.
         let done_list = &done_uploads;
         let upload_all = async {
-            let results: Vec<Result<Option<(usize, Option<ContentHash>)>>> = futures::stream::iter(pending.iter().copied())
+            let results: Vec<Result<Option<UploadedChunk>>> = futures::stream::iter(pending.iter().copied())
                 .map(|index| async move {
                     let Some(staged) = self.stage(index).await? else { return Ok(None) };
                     let uploaded = self.upload(index, staged).await?;
@@ -192,7 +195,7 @@ impl Disk {
         }
         for index in done {
             if let Ok(slot) = self.slot(index).await {
-                let mut slot = slot.lock().await;
+                let mut slot = slot.lock_owned().await;
                 slot.staged = false;
                 slot.held = false;
                 self.held.lock().unwrap().remove(&index);
@@ -205,7 +208,7 @@ impl Disk {
     /// place; its first write keeps a copy of this content. Returns
     /// the committed hash and the content, or `None` when the chunk is saved.
     async fn stage(&self, index: usize) -> Result<Option<Staged>> {
-        let mut slot = self.slot(index).await?.lock().await;
+        let mut slot = self.slot(index).await?.lock_owned().await;
         if !slot.unsaved {
             return Ok(None);
         }
@@ -220,15 +223,15 @@ impl Disk {
 
     async fn upload(&self, index: usize, staged: Staged) -> Result<(usize, Option<ContentHash>)> {
         let Staged { base, confirm, content } = staged;
-        let (packed, hash) = blocking(move || {
+        let (content, hash) = blocking(move || {
             if is_all_zero(&content) {
-                return Ok((None, None));
+                return Ok((content, None));
             }
             let hash = ContentHash::of(&content);
-            Ok((Some(codec::pack(&content, codec::CHUNK_LEVEL)?), Some(hash)))
+            Ok((content, Some(hash)))
         })
         .await?;
-        let (Some(packed), Some(hash)) = (packed, hash) else { return Ok((index, None)) };
+        let Some(hash) = hash else { return Ok((index, None)) };
         // Skip the upload only for the chunk that the current root already
         // has here: GC keeps it. Any other chunk may be garbage that GC is
         // about to delete, so upload it again; the new write time protects it.
@@ -240,6 +243,7 @@ impl Disk {
             (true, true) => self.bucket.exists(&keys::chunk(&hash)).await?,
         };
         if !skip {
+            let packed = blocking(move || codec::pack(&content, codec::CHUNK_LEVEL)).await?;
             self.bucket.put(&keys::chunk(&hash), packed.into()).await?;
         }
         Ok((index, Some(hash)))
@@ -247,7 +251,7 @@ impl Disk {
 
     /// The content a staged chunk had at its stage.
     async fn read_staged(&self, index: usize) -> Result<Vec<u8>> {
-        let slot = self.slot(index).await?.lock().await;
+        let slot = self.slot(index).await?.lock_owned().await;
         let (data, changed, held) = (self.data.clone(), slot.changed, slot.held);
         if let Some(content) = self.held.lock().unwrap().get(&index).filter(|_| changed) {
             return Ok(content.clone());
@@ -263,7 +267,7 @@ impl Disk {
     /// the head may already name these uploads, which GC may then delete.
     async fn fail_checkpoint(&self, pending: &[usize]) -> Result<()> {
         for &index in pending {
-            let mut slot = self.slot(index).await?.lock().await;
+            let mut slot = self.slot(index).await?.lock_owned().await;
             if slot.unsaved {
                 slot.reupload = true;
             }
@@ -274,7 +278,7 @@ impl Disk {
     /// Ends the stage of each chunk, and drops the held copies.
     async fn unstage(&self, indexes: &[usize]) -> Result<()> {
         for &index in indexes {
-            let mut slot = self.slot(index).await?.lock().await;
+            let mut slot = self.slot(index).await?.lock_owned().await;
             slot.staged = false;
             slot.held = false;
         }
@@ -378,7 +382,7 @@ impl Disk {
     }
 
     /// Only a network error is retried. A lost marker stops the disk for good.
-    async fn confirm_ownership(&self) -> Result<()> {
+    pub(crate) async fn confirm_ownership(&self) -> Result<()> {
         match ownership::owner_of(&self.bucket, &self.id, &self.node).await? {
             Owner::ThisNode => Ok(()),
             Owner::Nobody => self.lose_ownership("the attached marker is gone"),
@@ -388,15 +392,16 @@ impl Disk {
 
     pub(crate) fn lose_ownership(&self, reason: &str) -> Result<()> {
         self.ownership_lost.store(true, Ordering::SeqCst);
+        self.space_freed.notify_waiters();
         log::error!("disk {}: stopped, {reason}. Local data is kept", self.id);
         bail!("disk {}: {reason}", self.id)
     }
 
     /// S3 has the chunks now. A chunk the guest did not write since its
-    /// stage is saved, and stays local. Then local data over the limit is freed.
+    /// stage is saved. It moves to the clean cache, and local data is freed.
     async fn finish(&self, uploaded: Uploaded, started: Instant, skipped: bool) -> Result<()> {
         for &(index, hash) in &uploaded {
-            let mut slot = self.slot(index).await?.lock().await;
+            let mut slot = self.slot(index).await?.lock_owned().await;
             slot.base = hash;
             slot.reupload = false;
             slot.confirm = false;
@@ -407,7 +412,10 @@ impl Disk {
                 slot.verify = false;
                 slot.unsaved = false;
                 self.unsaved.lock().unwrap().remove(&index);
-                self.saved_local.lock().unwrap().push_back(index);
+                if !slot.queued_for_eviction {
+                    self.saved_local.lock().unwrap().push_back(index);
+                    slot.queued_for_eviction = true;
+                }
             }
         }
         let indexes: Vec<usize> = uploaded.iter().map(|&(index, _)| index).collect();

@@ -26,7 +26,7 @@ flowchart TB
 
     subgraph ssd["Local SSD (/var/lib/mica)"]
         dirty["Dirty chunks<br/>per disk, not in S3 yet"]
-        cache["Chunk cache<br/>shared by all disks"]
+        cache["Chunk cache<br/>budget per disk"]
     end
 
     s3[("S3 bucket<br/>R2 · Ceph · Garage")]
@@ -112,7 +112,7 @@ flowchart LR
 ```text
 /var/lib/mica/
   node-id                      random ID of this node
-  cache/<xx>/<chunk hash>      clean chunks, not compressed; S3 has all of them
+  disk-cache/<disk>/<xx>/<hash> clean chunks, independently limited per disk
   pages/<xx>/<page hash>       pages; S3 has all of them
 /run/mica/sessions/<data dir>/<disk>.recent
                                bitmap of chunks that became local since their last FLUSH
@@ -123,11 +123,11 @@ flowchart LR
     dirty/hold                 old content of chunks that a checkpoint uploads now
 ```
 
-**Local chunks** live in the data files, one file per GiB of the disk, at the chunk's offset in the disk. The guest writes them in place. A local chunk is **unsaved** until a checkpoint uploads it, then **saved**. A saved chunk stays local, so the guest can write it again at once. Unsaved chunks are the only local data that S3 does not have. mica never frees one before a commit includes it.
+**Local chunks** live in the data files, one file per GiB of the disk, at the chunk's offset in the disk. The guest writes them in place. A local chunk is **unsaved** until a checkpoint uploads it, then **saved**. A saved chunk moves to the clean cache and its data-file range is freed. Unsaved chunks are the only local data that S3 does not have. mica never frees one before a commit includes it.
 
 **The dirty log** lists the local chunks. After a power loss, only listed chunks are local; mica punches out every other range of the data files. Two files are used in turn: a rewrite goes to the file not in use and is synced before it counts, so one of the two is always whole. **`recent`** is a bitmap of the chunks that became local since their last FLUSH: one bit per chunk, in `/run`, mapped into memory. Setting a bit is one memory store. `/run` is a tmpfs, so the bitmap survives a crash of mica, as the page cache does, and a reboot clears it, as it clears the page cache.
 
-**The cache** holds clean chunks. Any of them can go, because S3 has them all. The cache evicts the least recently used chunks at its limit (50 GiB by default), and `mica cache prune` removes chunks that no attached disk uses. A saved chunk goes into the cache when it leaves the data files: when local data passes `dirty_limit_gib`, and at detach.
+**The cache** holds clean chunks separately for each disk, with a default budget of 1 GiB. It evicts least recently used chunks at its limit. Saved chunks enter this cache after a successful checkpoint. The host reconciler enforces an aggregate cache safeguard and free-space headroom. `mica cache prune` removes chunks not referenced by attached disks. See [storage budgets](operations.md#per-disk-storage-budgets).
 
 A download is written to the cache without a sync, so a read does not wait for the SSD. After a crash, a cache file can be torn. So mica checks the hash of each cache file that it finds at start, before the first read from it.
 

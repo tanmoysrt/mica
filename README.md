@@ -47,7 +47,7 @@ mica keeps a disk's data in a shared bucket and uses local storage for speed. It
 
 ```text
 mica status                          show disks attached here
-mica disk      ls | create | attach | mount | unmount | detach | checkpoint | warm | resize | delete
+mica disk      ls | create | attach | mount | unmount | detach | checkpoint | warm | set-limits | resize | delete
 mica snapshot  ls | create | delete
 mica gc                              remove unneeded data from the bucket
 mica cache     status | prune

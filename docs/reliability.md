@@ -137,10 +137,12 @@ For a short time the head may point to node A's root. It is still a full disk, n
 
 A restart pauses I/O for about one second, and loses nothing:
 
-1. On SIGTERM, the daemon runs one last checkpoint for each disk (at most 60 s). The guest's I/O is still served during this time. A checkpoint that takes longer runs on, but the daemon stops waiting for it. It never stops in the middle of a chunk.
+1. On SIGTERM, the daemon runs one last checkpoint for each disk (up to four concurrently, with one 60 s deadline). The guest's I/O is still served during this time. A checkpoint that takes longer runs on, but the daemon stops waiting for it. It never stops in the middle of a chunk.
 2. The daemon exits and keeps its devices. The kernel holds new I/O.
 3. The new daemon opens each disk from the same local files. Every write mica acknowledged is in their page cache, and the dirty log or `recent` lists its chunk.
 4. It takes each device over. The kernel sends the held and in-flight requests again.
+
+Transient recovery failures remain visible as recovering disks and retry every 10 seconds. Their devices stay paused until recovery succeeds.
 
 If no daemon comes back, I/O waits for ever. So `mica.service` uses `Restart=always`, and `mica service stop` refuses while disks are attached.
 
@@ -172,7 +174,7 @@ In v0.1, we tested the repair with a script that deleted every new chunk right a
 ## Local space
 
 - The dirty chunks of a disk have a limit (20 GiB by default). At 512 MiB, or at half of the limit, a checkpoint starts early. At the limit, new writes wait until a checkpoint frees space. The guest sees a slow disk, not an I/O error.
-- The cache has a limit (50 GiB by default). At the limit, it deletes the least recently used chunks. Any cache chunk can go, because S3 has it.
+- Each disk has a clean-cache budget (1 GiB by default), independent of pending writes. A host-wide limit (50 GiB by default) and filesystem headroom safeguard trigger additional eviction. See [storage budgets](operations.md#per-disk-storage-budgets).
 
 ## What is not protected
 

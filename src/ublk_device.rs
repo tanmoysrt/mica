@@ -73,6 +73,23 @@ impl UblkDevice {
         self.ctrl.disown();
     }
 
+    pub fn restore_size(&self, size: u64) -> Result<()> {
+        ensure_control_ring()?;
+        let mut params = sys::ublk_params::default();
+        self.ctrl.get_params(&mut params)?;
+        if params.basic.dev_sectors << 9 != size {
+            let result = self.resize_control()?.update_size(size)?;
+            anyhow::ensure!(result >= 0, "restore ublk size: errno {}", -result);
+        }
+        Ok(())
+    }
+
+    pub fn resize_control(&self) -> Result<Arc<UblkCtrl>> {
+        anyhow::ensure!(self.ctrl.get_driver_features().is_some_and(|flags| flags & sys::UBLK_F_UPDATE_SIZE as u64 != 0),
+            "this kernel does not support online ublk resize; detach the disk first");
+        Ok(self.ctrl.clone())
+    }
+
     fn launch(disk: Arc<Disk>, runtime: Handle, recover_id: Option<i32>) -> Result<Self> {
         ensure_control_ring()?;
         let builder = UblkCtrlBuilder::default()
@@ -91,7 +108,7 @@ impl UblkDevice {
         let id = ctrl.dev_info().dev_id as i32;
         let (ready_sender, ready) = mpsc::channel::<Result<String, String>>();
         let thread_ctrl = ctrl.clone();
-        let (size, chunk_size) = (disk.size, disk.chunk_size as u32);
+        let (size, chunk_size) = (disk.size(), disk.chunk_size as u32);
         let thread = std::thread::Builder::new().name(format!("ublk-{}", disk.id)).spawn(move || {
             if let Err(error) = ensure_control_ring() {
                 let _ = ready_sender.send(Err(error.to_string()));
@@ -133,7 +150,7 @@ pub fn device_exists(id: i32) -> bool {
 
 /// libublk keeps its control ring per thread. A thread that sends control
 /// commands (start, stop) needs its own ring, not only the thread that built `UblkCtrl`.
-fn ensure_control_ring() -> Result<()> {
+pub(crate) fn ensure_control_ring() -> Result<()> {
     libublk::ublk_init_ctrl_task_ring(|ring| {
         if ring.is_none() {
             *ring = Some(IoUring::<squeue::Entry128>::builder().build(32).map_err(UblkError::IOError)?);

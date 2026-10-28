@@ -2,7 +2,7 @@
 
 ```text
 mica status                          Show attached disks
-mica disk      ls | create | attach | mount | unmount | detach | checkpoint | warm | resize | delete
+mica disk      ls | create | attach | mount | unmount | detach | checkpoint | warm | set-limits | resize | delete
 mica snapshot  ls | create | delete
 mica gc                              Delete data that no disk or snapshot needs
 mica cache     status | prune        Show and prune the local chunk cache
@@ -57,7 +57,7 @@ disk-2   20GiB   -               2 days ago
 ### disk create
 
 ```bash
-mica disk create disk-1 --size 20G
+mica disk create disk-1 --size 50G --cache-size 500M --dirty-size 256M
 mica disk create disk-2 --size 100G --chunk-size 64K
 mica disk create sandbox-7 --from-snapshot base-image
 mica disk create sandbox-8 --from-snapshot base-image --size 40G
@@ -66,6 +66,8 @@ mica disk create sandbox-8 --from-snapshot base-image --size 40G
 | Option | Meaning |
 |---|---|
 | `--size <SIZE>` | Size of an empty disk, or a larger size for a disk from a snapshot |
+| `--cache-size <SIZE>` | Clean cache retained locally for this disk, independently of its provisioned size |
+| `--dirty-size <SIZE>` | Pending-write high-water mark; writes wait for checkpoint progress at this limit |
 | `--from-snapshot <SNAPSHOT>` | Start from this snapshot. No data is copied. |
 | `--chunk-size <SIZE>` | Chunk size of an empty disk: 64K, 128K, 256K, 512K, 1M, 2M or 4M. Default: 256K. A disk from a snapshot has the chunk size of the snapshot. |
 
@@ -75,7 +77,7 @@ A small chunk size makes cold reads and small uploads cheaper. A large one needs
 
 ### disk warm
 
-Downloads every chunk of a disk that the local cache does not have, several at a time. Later reads of the disk never wait for S3. It works on an attached or a detached disk, so a node can be warmed with a base image before any sandbox starts.
+Downloads every chunk of a disk that the local cache does not have, several at a time. Reads of chunks that remain cached avoid S3; a disk larger than its cache cannot stay fully warm. It works on an attached or a detached disk, so a node can be warmed with a base image before any sandbox starts.
 
 ```text
 $ mica disk warm base-image
@@ -152,15 +154,26 @@ Saved disk disk-1 in S3 (seq 42, 830 ms). Not in S3 now: 0B
 
 "Not in S3 now" is the data that the guest wrote during the checkpoint.
 
+### disk set-limits
+
+Change either budget on a detached disk or a disk attached here. Omitted budgets keep their current values. Limits are saved in the S3 head and follow the disk between nodes.
+
+```bash
+mica disk set-limits disk-1 --cache-size 500M --dirty-size 256M
+mica status
+```
+
+The cache must hold at least one chunk; the pending-write budget must hold at least two. Reducing a cache budget starts eviction on the next reconciliation pass. Reducing the pending-write budget pauses new writes until uploads catch up; it never drops pending data. In-flight writes and temporary checkpoint copies can exceed the pending-write high-water mark.
+
 ### disk resize
 
-Makes a detached disk larger. Grow the filesystem afterwards (`resize2fs` or `xfs_growfs`).
+Makes a disk larger, including while attached on this node. Online growth requires a kernel advertising `UBLK_F_UPDATE_SIZE`; otherwise detach first. Grow the filesystem afterwards (`resize2fs` or `xfs_growfs`). A VM may also need its virtual device capacity updated by the hypervisor.
 
 ```bash
 mica disk resize disk-1 --size 40G
 ```
 
-A disk cannot be made smaller.
+A disk cannot be made smaller. Sizes round up to whole chunks. If the kernel update fails after the larger size was committed to S3, repeat the same command to finish applying it; the daemon also restores the committed size during recovery.
 
 ### disk delete
 

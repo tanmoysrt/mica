@@ -4,9 +4,13 @@
 
 socket = "/run/mica.sock"
 data_dir = "/var/lib/mica"
-# Clean chunk cache, shared by all disks on this node.
+# Host-wide safeguard for total clean-cache data.
 cache_limit_gib = 50
-# Local data not yet in S3, for each attached disk.
+# Default clean-cache budget per disk; disk --cache-size overrides it.
+disk_cache_limit_mib = 1024
+# Reclaim clean cache and pause new writes below this filesystem headroom.
+local_reserve_mib = 1024
+# Default pending-write budget per disk; disk --dirty-size overrides it.
 dirty_limit_gib = 20
 checkpoint_interval_secs = 180
 # A disk is "behind" when data not in S3 is older than this.

@@ -1,4 +1,6 @@
 use crate::daemon::{Daemon, Prefetch};
+use crate::disk_limits::DiskLimits;
+use crate::disk_operations::DiskOperation;
 use crate::manifest::DEFAULT_CHUNK_SIZE;
 use crate::managed_mount::{self, FolderOwner};
 use crate::ownership::{self, Owner};
@@ -25,11 +27,14 @@ pub enum Request {
         from_snapshot: Option<String>,
         #[serde(default)]
         chunk_size: Option<u64>,
+        #[serde(default)]
+        limits: DiskLimits,
     },
     Snapshot { disk: String, name: String },
     /// Upload the local changes of an attached disk now, and commit them.
     Checkpoint { disk: String },
     Resize { disk: String, size: u64 },
+    SetLimits { disk: String, limits: DiskLimits },
     Attach {
         disk: String,
         force: bool,
@@ -160,17 +165,14 @@ async fn dispatch(daemon: &Arc<Daemon>, request: Request, caller_uid: Option<u32
         _ => log::info!("request: {request:?}"),
     }
     match request {
-        Request::Create { disk, size, from_snapshot, chunk_size } => {
-            create(daemon, &disk, size, from_snapshot, chunk_size).await
+        Request::Create { disk, size, from_snapshot, chunk_size, limits } => {
+            let lock = daemon.disk_lock(&disk);
+            let _operation = lock.lock().await;
+            create(daemon, &disk, size, from_snapshot, chunk_size, limits).await
         }
         Request::Snapshot { disk, name } => snapshot(daemon, &disk, &name).await,
-        Request::Resize { disk, size } => {
-            if daemon.disks.lock().await.contains_key(&disk) {
-                bail!("disk {disk} is attached here. Detach it first");
-            }
-            daemon.catalog().resize(&disk, size).await?;
-            Ok(json!({ "disk": disk, "size": size }))
-        }
+        Request::Resize { disk, size } => daemon.operate_disk(&disk, DiskOperation::Resize(size)).await,
+        Request::SetLimits { disk, limits } => daemon.operate_disk(&disk, DiskOperation::Limits(limits)).await,
         Request::Checkpoint { disk } => checkpoint(daemon, &disk).await,
         Request::Attach { disk, force, prefetch, prefetch_parallel, fill } => {
             // Taking a disk from another node can lose its data, so only root may.
@@ -188,13 +190,7 @@ async fn dispatch(daemon: &Arc<Daemon>, request: Request, caller_uid: Option<u32
         Request::Status => Ok(daemon.status().await),
         Request::ListDisks => Ok(json!({ "disks": daemon.catalog().list_disks().await? })),
         Request::DescribeDisks { disks } => describe_disks(daemon, disks).await,
-        Request::DeleteDisk { disk } => {
-            if daemon.disks.lock().await.contains_key(&disk) {
-                bail!("disk {disk} is attached here. Detach it first");
-            }
-            daemon.catalog().delete_disk(&disk).await?;
-            Ok(json!({ "disk": disk }))
-        }
+        Request::DeleteDisk { disk } => daemon.operate_disk(&disk, DiskOperation::Delete).await,
         Request::ListSnapshots => Ok(json!({ "snapshots": daemon.catalog().list_snapshots().await? })),
         Request::DescribeSnapshots { names } => describe_snapshots(daemon, names).await,
         Request::Warm { disk, parallel } => daemon.warm(&disk, parallel).await,
@@ -240,12 +236,13 @@ async fn create(
     size: Option<u64>,
     from_snapshot: Option<String>,
     chunk_size: Option<u64>,
+    limits: DiskLimits,
 ) -> Result<Value> {
     let catalog = daemon.catalog();
     match (&from_snapshot, size) {
         (Some(_), _) if chunk_size.is_some() => bail!("a disk from a snapshot has the chunk size of the snapshot"),
-        (Some(snapshot), size) => catalog.clone_snapshot(snapshot, disk, size).await?,
-        (None, Some(size)) => catalog.create(disk, size, chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE)).await?,
+        (Some(snapshot), size) => catalog.clone_snapshot(snapshot, disk, size, limits).await?,
+        (None, Some(size)) => catalog.create(disk, size, chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE), limits).await?,
         (None, None) => bail!("give --size, or --from-snapshot"),
     }
     let manifest = catalog.load(disk).await?.manifest;

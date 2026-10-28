@@ -13,6 +13,8 @@ pub struct Config {
     pub data_dir: PathBuf,
     pub cache_limit_gib: u64,
     pub dirty_limit_gib: u64,
+    pub disk_cache_limit_mib: u64,
+    pub local_reserve_mib: u64,
     pub checkpoint_interval_secs: u64,
     /// A checkpoint also starts when this much local data is not in S3, so
     /// uploads run while the guest writes, and a detach has little left to do.
@@ -62,6 +64,8 @@ impl Default for Config {
             data_dir: PathBuf::from("/var/lib/mica"),
             cache_limit_gib: 50,
             dirty_limit_gib: 20,
+            disk_cache_limit_mib: 1024,
+            local_reserve_mib: 1024,
             checkpoint_interval_secs: 30,
             checkpoint_after_mib: 512,
             max_unsaved_minutes: 5,

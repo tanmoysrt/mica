@@ -1,5 +1,6 @@
 use crate::bucket::{Bucket, keys};
 use crate::content_hash::ContentHash;
+use crate::disk_limits::DiskLimits;
 use crate::manifest::Manifest;
 use crate::records::{AttachedMarker, Head, Snapshot};
 use anyhow::{Result, anyhow, bail, ensure};
@@ -12,6 +13,7 @@ pub struct Catalog<'a> {
 
 #[derive(Debug, serde::Serialize)]
 pub struct DiskSummary {
+    pub limits: DiskLimits,
     pub disk: String,
     pub size: u64,
     pub seq: u64,
@@ -38,17 +40,18 @@ impl<'a> Catalog<'a> {
         Self { bucket, node_name }
     }
 
-    pub async fn create(&self, disk_id: &str, size: u64, chunk_size: u64) -> Result<()> {
+    pub async fn create(&self, disk_id: &str, size: u64, chunk_size: u64, limits: DiskLimits) -> Result<()> {
         validate_name(disk_id)?;
         ensure!(size > 0, "disk size must be more than zero");
         self.ensure_new_disk(disk_id).await?;
         let manifest = Manifest::empty(disk_id, size, chunk_size)?;
+        limits.validate(manifest.chunk_size)?;
         let hash = manifest.save(self.bucket).await?;
-        Head::new(&hash, Vec::new(), 0, self.node_name).save(self.bucket, disk_id).await
+        Head::new(&hash, Vec::new(), 0, self.node_name).with_limits(limits).create(self.bucket, disk_id).await
     }
 
     /// A clone points to the root of the snapshot. It copies no pages or chunks.
-    pub async fn clone_snapshot(&self, snapshot: &str, disk_id: &str, size: Option<u64>) -> Result<()> {
+    pub async fn clone_snapshot(&self, snapshot: &str, disk_id: &str, size: Option<u64>, limits: DiskLimits) -> Result<()> {
         validate_name(disk_id)?;
         self.ensure_new_disk(disk_id).await?;
         let record = Snapshot::load(self.bucket, snapshot)
@@ -61,7 +64,8 @@ impl<'a> Catalog<'a> {
             manifest.grow_to(size)?;
             hash = manifest.save(self.bucket).await?;
         }
-        Head::new(&hash, record.profile, manifest.seq, self.node_name).save(self.bucket, disk_id).await?;
+        limits.validate(manifest.chunk_size)?;
+        Head::new(&hash, record.profile, manifest.seq, self.node_name).with_limits(limits).create(self.bucket, disk_id).await?;
         // If the snapshot was deleted meanwhile, GC may free its chunks. Undo.
         if !self.bucket.exists(&keys::snapshot(snapshot)).await? {
             self.bucket.delete(&keys::head(disk_id)).await?;
@@ -87,13 +91,11 @@ impl<'a> Catalog<'a> {
         .await
     }
 
+    /// The caller holds the operation lock and ownership marker.
     /// Deletes only the head. Chunks and manifests stay, because snapshots and
     /// disks made from them may share them.
     pub async fn delete_disk(&self, disk_id: &str) -> Result<()> {
         self.load_head(disk_id).await?;
-        if let Some(marker) = AttachedMarker::load(self.bucket, disk_id).await? {
-            bail!("disk {disk_id} is attached on {}. Detach it first", marker.node);
-        }
         self.bucket.delete(&keys::head(disk_id)).await
     }
 
@@ -119,16 +121,13 @@ impl<'a> Catalog<'a> {
         Ok(SnapshotSummary { name: name.to_string(), size, disk: record.disk, time: record.time })
     }
 
-    /// Makes a detached disk larger. Grow the filesystem in the guest after this.
+    /// The caller holds the disk operation lock and its S3 ownership marker.
     pub async fn resize(&self, disk_id: &str, size: u64) -> Result<()> {
-        if let Some(marker) = AttachedMarker::load(self.bucket, disk_id).await? {
-            bail!("disk {disk_id} is attached on {}. Detach it first", marker.node);
-        }
         let disk = self.load(disk_id).await?;
         let mut manifest = disk.manifest.next(disk_id, disk.manifest_hash);
         manifest.grow_to(size)?;
         let hash = manifest.save(self.bucket).await?;
-        Head::new(&hash, disk.head.profile, manifest.seq, self.node_name).save(self.bucket, disk_id).await
+        Head::new(&hash, disk.head.profile, manifest.seq, self.node_name).with_limits(disk.head.limits).save(self.bucket, disk_id).await
     }
 
     pub async fn list_disks(&self) -> Result<Vec<String>> {
@@ -144,6 +143,7 @@ impl<'a> Catalog<'a> {
         let marker = AttachedMarker::load(self.bucket, disk_id).await?;
         let size = self.manifest_disk_size(&head.manifest_hash()?).await?;
         Ok(DiskSummary {
+            limits: head.limits,
             disk: disk_id.to_string(),
             size,
             seq: head.seq,

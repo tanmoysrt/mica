@@ -8,6 +8,7 @@ use futures::{StreamExt, TryStreamExt};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Pages kept decoded in memory. A page is about 33 KiB, so this is ~34 MiB.
 const MEMORY_PAGES: usize = 1024;
@@ -36,12 +37,12 @@ impl PageStore {
     }
 
     pub async fn get(&self, hash: &ContentHash) -> Result<Arc<Page>> {
-        if let Some(page) = self.from_memory(hash) {
+        if let Some(page) = self.cached_page(hash) {
             return Ok(page);
         }
         let lock = self.fetches.lock().unwrap().entry(*hash).or_default().clone();
         let _one_fetch = lock.lock().await;
-        if let Some(page) = self.from_memory(hash) {
+        if let Some(page) = self.cached_page(hash) {
             return Ok(page);
         }
         let result = self.load(hash).await;
@@ -102,7 +103,7 @@ impl PageStore {
         Ok(page)
     }
 
-    fn from_memory(&self, hash: &ContentHash) -> Option<Arc<Page>> {
+    fn cached_page(&self, hash: &ContentHash) -> Option<Arc<Page>> {
         let mut memory = self.memory.lock().unwrap();
         memory.clock += 1;
         let now = memory.clock;
@@ -135,8 +136,34 @@ impl PageStore {
 /// Without a sync: a torn file fails its hash check and is fetched again.
 fn write_file(path: &std::path::Path, data: &[u8]) -> Result<()> {
     std::fs::create_dir_all(path.parent().unwrap())?;
-    let temp = path.with_extension("tmp");
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let temp = path.with_extension(format!("{}.tmp", NEXT.fetch_add(1, Ordering::Relaxed)));
     std::fs::write(&temp, data)?;
     std::fs::rename(&temp, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn concurrent_writers_of_the_same_page_all_succeed() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("page");
+        let data = Page::zero().encode();
+        let start = std::sync::Barrier::new(16);
+        std::thread::scope(|scope| {
+            for _ in 0..16 {
+                scope.spawn(|| {
+                    start.wait();
+                    for _ in 0..20 {
+                        write_file(&path, &data).unwrap();
+                    }
+                });
+            }
+        });
+        assert_eq!(std::fs::read(path).unwrap(), data);
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
 }

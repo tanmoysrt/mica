@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 /// `disks/<disk-id>/head`: the current manifest of a disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Head {
+    #[serde(default)]
+    pub limits: crate::disk_limits::DiskLimits,
     pub manifest: String,
     pub profile: Vec<u32>,
     pub seq: u64,
@@ -41,7 +43,12 @@ pub struct Snapshot {
 
 impl Head {
     pub fn new(manifest: &ContentHash, profile: Vec<u32>, seq: u64, node: &str) -> Self {
-        Self { manifest: manifest.to_reference(), profile, seq, node: node.to_string(), time: now_text() }
+        Self { limits: Default::default(), manifest: manifest.to_reference(), profile, seq, node: node.to_string(), time: now_text() }
+    }
+
+    pub fn with_limits(mut self, limits: crate::disk_limits::DiskLimits) -> Self {
+        self.limits = limits;
+        self
     }
 
     pub fn manifest_hash(&self) -> Result<ContentHash> {
@@ -50,6 +57,16 @@ impl Head {
 
     pub async fn load(bucket: &Bucket, disk_id: &str) -> Result<Option<Self>> {
         load_json(bucket, &keys::head(disk_id)).await
+    }
+
+    pub async fn create(&self, bucket: &Bucket, disk_id: &str) -> Result<()> {
+        if bucket.conditional_writes() {
+            anyhow::ensure!(bucket.put_if_absent(&keys::head(disk_id), serde_json::to_vec_pretty(self)?.into()).await?,
+                "disk {disk_id} already exists");
+            Ok(())
+        } else {
+            self.save(bucket, disk_id).await
+        }
     }
 
     pub async fn save(&self, bucket: &Bucket, disk_id: &str) -> Result<()> {
@@ -100,4 +117,27 @@ async fn load_json<T: DeserializeOwned>(bucket: &Bucket, key: &str) -> Result<Op
 
 async fn save_json<T: Serialize>(bucket: &Bucket, key: &str, value: &T) -> Result<()> {
     bucket.put(key, serde_json::to_vec_pretty(value)?.into()).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn creating_the_same_disk_twice_does_not_overwrite_its_head() {
+        let bucket = Bucket::in_memory();
+        let first = Head::new(&ContentHash::of(b"first"), vec![], 0, "one");
+        let second = Head::new(&ContentHash::of(b"second"), vec![], 0, "two");
+        let (a, b) = tokio::join!(first.create(&bucket, "disk"), second.create(&bucket, "disk"));
+        assert_ne!(a.is_ok(), b.is_ok());
+        let head = Head::load(&bucket, "disk").await.unwrap().unwrap();
+        assert_eq!(head.manifest, if a.is_ok() { first.manifest } else { second.manifest });
+    }
+
+    #[test]
+    fn old_heads_have_default_limits() {
+        let head: Head = serde_json::from_str(r#"{"manifest":"sha256:unused","profile":[],"seq":0,"node":"old","time":"now"}"#).unwrap();
+        assert_eq!(head.limits.cache_bytes, None);
+        assert_eq!(head.limits.dirty_bytes, None);
+    }
 }

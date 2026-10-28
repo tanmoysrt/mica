@@ -1,6 +1,10 @@
 mod api;
 mod blocking;
 mod bucket;
+mod cache_manager;
+mod disk_limits;
+mod disk_resize;
+mod disk_operations;
 mod catalog;
 mod checkpoint;
 mod chunk_cache;

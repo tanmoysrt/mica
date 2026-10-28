@@ -3,6 +3,7 @@ use crate::local_state::{DiskFolder, LocalStatus};
 use crate::ownership::{self, Owner};
 use crate::ublk_device::{UblkDevice, device_exists, remove_paused_device};
 use anyhow::Result;
+use futures::StreamExt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,9 +13,25 @@ impl Daemon {
     /// After a restart: takes back devices the last daemon left paused, and
     /// finishes the detach of disks whose device is gone (after a reboot).
     pub(crate) async fn recover_disks(self: &Arc<Self>) -> Result<()> {
-        for folder in DiskFolder::list(&self.config.data_dir)? {
+        let root = self.config.data_dir.clone();
+        let folders = crate::blocking::blocking(move || DiskFolder::list(&root)).await?;
+        for folder in folders {
+            self.recovering.lock().await.insert(folder.disk_id.clone());
             if let Err(error) = self.recover_disk(&folder).await {
-                log::error!("disk {}: recovery failed: {error:#}", folder.disk_id);
+                log::error!("disk {}: recovery failed, will retry: {error:#}", folder.disk_id);
+                let daemon = self.clone();
+                tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                        match daemon.recover_disk(&folder).await {
+                            Ok(()) => break,
+                            Err(error) => log::warn!("disk {}: recovery retry failed: {error:#}", folder.disk_id),
+                        }
+                    }
+                    daemon.recovering.lock().await.remove(&folder.disk_id);
+                });
+            } else {
+                self.recovering.lock().await.remove(&folder.disk_id);
             }
         }
         Ok(())
@@ -25,21 +42,29 @@ impl Daemon {
     pub async fn shut_down(&self) {
         // Held until exit, so no attach or detach starts now.
         let disks = self.disks.lock().await;
-        let mut paused = 0;
-        for (disk_id, attached) in disks.iter() {
-            let Some(device) = &attached.device else { continue };
-            // A task of its own: the timeout stops the wait, never the
-            // checkpoint, which could otherwise stop in the middle of a freeze.
-            let disk = attached.disk.clone();
-            let checkpoint = tokio::spawn(async move { disk.checkpoint().await });
-            match tokio::time::timeout(LAST_CHECKPOINT_LIMIT, checkpoint).await {
-                Ok(Ok(Ok(()))) => {}
-                Ok(Ok(Err(error))) => log::warn!("disk {disk_id}: last checkpoint failed: {error:#}"),
-                Ok(Err(error)) => log::warn!("disk {disk_id}: last checkpoint stopped: {error}"),
-                Err(_) => log::warn!("disk {disk_id}: last checkpoint took too long; local data stays on the SSD"),
+        let mut checkpoints = Vec::new();
+        for attached in disks.values() {
+            if let Some(device) = &attached.device {
+                device.hand_over();
+                checkpoints.push(attached.disk.clone());
             }
-            device.hand_over();
-            paused += 1;
+        }
+        let paused = checkpoints.len();
+        let checkpoint = tokio::spawn(async move {
+            futures::stream::iter(checkpoints)
+                .map(|disk| async move {
+                    if let Err(error) = disk.checkpoint().await {
+                        log::warn!("disk {}: last checkpoint failed: {error:#}", disk.id);
+                    }
+                })
+                .buffer_unordered(4)
+                .collect::<Vec<_>>()
+                .await;
+        });
+        match tokio::time::timeout(LAST_CHECKPOINT_LIMIT, checkpoint).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => log::warn!("last checkpoints stopped: {error}"),
+            Err(_) => log::warn!("last checkpoints took too long; local data stays on the SSD"),
         }
         if paused > 0 {
             log::warn!("{paused} devices are paused until mica starts again");
@@ -48,6 +73,8 @@ impl Daemon {
 
     async fn recover_disk(self: &Arc<Self>, folder: &DiskFolder) -> Result<()> {
         let disk_id = &folder.disk_id;
+        let lock = self.disk_lock(disk_id);
+        let _operation = lock.lock().await;
         if folder.status()? == LocalStatus::Orphaned {
             log::warn!("disk {disk_id}: orphaned local data in {}", folder.path.display());
             return Ok(());
@@ -55,10 +82,8 @@ impl Daemon {
         let owner = ownership::owner_of(&self.bucket, disk_id, &self.node).await?;
         if let Some(id) = folder.ublk_id()?.filter(|id| device_exists(*id)) {
             if matches!(owner, Owner::ThisNode) {
-                match self.take_over(folder, id).await {
-                    Ok(()) => return Ok(()),
-                    Err(error) => log::error!("disk {disk_id}: cannot take over /dev/ublkb{id}: {error:#}"),
-                }
+                self.take_over(folder, id).await?;
+                return Ok(());
             }
             // Nobody will serve this device. Remove it, so its users get
             // I/O errors instead of waiting forever.
@@ -93,7 +118,11 @@ impl Daemon {
         let disk = Arc::new(self.open_disk(&folder.disk_id, folder).await?);
         let runtime = tokio::runtime::Handle::current();
         let device_disk = disk.clone();
-        let device = tokio::task::spawn_blocking(move || UblkDevice::recover(device_disk, runtime, id)).await??;
+        let device = tokio::task::spawn_blocking(move || {
+            let device = UblkDevice::recover(device_disk.clone(), runtime, id)?;
+            device.restore_size(device_disk.size())?;
+            Ok::<_, anyhow::Error>(device)
+        }).await??;
         log::info!("disk {}: took over {} from the last run", folder.disk_id, device.path);
         let mut disks = self.disks.lock().await;
         // The guest runs on; no startup profile, but read-ahead and fill as configured.

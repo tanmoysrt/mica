@@ -3,6 +3,7 @@ use crate::commands::{ask_before_delete, ask_before_reads, parse_size};
 use crate::managed_mount::{self, FolderOwner};
 use crate::output::{self, bytes};
 use crate::service;
+use crate::disk_limits::DiskLimits;
 use anyhow::{Context, Result, anyhow};
 use clap::Subcommand;
 use std::path::{Path, PathBuf};
@@ -27,6 +28,12 @@ pub enum DiskCommand {
         /// Chunk size of a new disk: 64K, 256K, 1M or 4M [default: 256K]
         #[arg(long, value_name = "SIZE")]
         chunk_size: Option<String>,
+        /// Clean cache budget, such as 500M
+        #[arg(long)]
+        cache_size: Option<String>,
+        /// Pending-write budget, such as 256M
+        #[arg(long)]
+        dirty_size: Option<String>,
     },
     /// Upload the changes of an attached disk now, without a detach
     Checkpoint { disk: String },
@@ -74,7 +81,15 @@ pub enum DiskCommand {
     },
     /// Upload and release a disk
     Detach { disk: String },
-    /// Grow a detached disk
+    /// Change the clean-cache or pending-write budget
+    SetLimits {
+        disk: String,
+        #[arg(long)]
+        cache_size: Option<String>,
+        #[arg(long)]
+        dirty_size: Option<String>,
+    },
+    /// Grow a disk, including while attached on this node
     Resize {
         disk: String,
         /// New size, such as 40G
@@ -93,10 +108,11 @@ pub enum DiskCommand {
 pub async fn run(command: DiskCommand, socket: &Path) -> Result<()> {
     match command {
         DiskCommand::Ls { yes } => list(socket, yes).await?,
-        DiskCommand::Create { disk, size, from_snapshot, chunk_size } => {
+        DiskCommand::Create { disk, size, from_snapshot, chunk_size, cache_size, dirty_size } => {
             let size = size.as_deref().map(parse_size).transpose()?;
             let chunk_size = chunk_size.as_deref().map(parse_size).transpose()?;
-            let request = Request::Create { disk: disk.clone(), size, from_snapshot: from_snapshot.clone(), chunk_size };
+            let limits = DiskLimits { cache_bytes: cache_size.as_deref().map(parse_size).transpose()?, dirty_bytes: dirty_size.as_deref().map(parse_size).transpose()? };
+            let request = Request::Create { disk: disk.clone(), size, from_snapshot: from_snapshot.clone(), chunk_size, limits };
             let result = send(socket, &request).await?;
             let size = bytes(result["size"].as_u64().unwrap_or(0));
             match from_snapshot {
@@ -128,6 +144,12 @@ pub async fn run(command: DiskCommand, socket: &Path) -> Result<()> {
         DiskCommand::Detach { disk } => {
             send(socket, &Request::Detach { disk: disk.clone() }).await?;
             println!("Detached disk {disk}. All its data is in S3");
+        }
+        DiskCommand::SetLimits { disk, cache_size, dirty_size } => {
+            let limits = DiskLimits { cache_bytes: cache_size.as_deref().map(parse_size).transpose()?, dirty_bytes: dirty_size.as_deref().map(parse_size).transpose()? };
+            anyhow::ensure!(limits.cache_bytes.is_some() || limits.dirty_bytes.is_some(), "give --cache-size or --dirty-size");
+            let result = send(socket, &Request::SetLimits { disk, limits }).await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
         }
         DiskCommand::Resize { disk, size } => {
             let size = parse_size(&size)?;

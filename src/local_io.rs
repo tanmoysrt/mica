@@ -1,7 +1,7 @@
 use crate::disk::{ChunkPart, ChunkSlot, Disk, ReadPass, Source};
 use std::fs::File;
 use std::sync::Arc;
-use tokio::sync::MutexGuard;
+use tokio::sync::OwnedMutexGuard;
 
 /// A read that the ublk queue thread can serve alone: every part is local.
 /// The pass keeps the space of its local chunks until the read ends.
@@ -16,15 +16,15 @@ pub struct LocalRead<'a> {
 /// in the normal write path, so a checkpoint cannot stage a chunk mid-write.
 pub struct LocalWrite<'a> {
     disk: &'a Disk,
-    pub parts: Vec<LocalWritePart<'a>>,
+    pub parts: Vec<LocalWritePart>,
 }
 
-pub struct LocalWritePart<'a> {
+pub struct LocalWritePart {
     pub part: ChunkPart,
     pub file: Arc<File>,
     /// The offset of the part in `file`.
     pub offset: u64,
-    slot: MutexGuard<'a, ChunkSlot>,
+    slot: OwnedMutexGuard<ChunkSlot>,
 }
 
 impl Disk {
@@ -35,7 +35,7 @@ impl Disk {
         let pass = self.start_read();
         let mut parts = Vec::new();
         for part in self.split(offset, len).ok()? {
-            let slot = self.loaded_slot(part.index)?.try_lock().ok()?;
+            let slot = self.loaded_slot(part.index)?.try_lock_owned().ok()?;
             let source = match (slot.local, slot.base) {
                 (true, _) => {
                     let (file, start) = self.data.location(part.index);
@@ -63,7 +63,7 @@ impl Disk {
         }
         let mut slots = Vec::new();
         for part in self.split(offset, len).ok()? {
-            let slot = self.loaded_slot(part.index)?.try_lock().ok()?;
+            let slot = self.loaded_slot(part.index)?.try_lock_owned().ok()?;
             // A staged chunk needs a held copy first: the normal path makes it.
             if !slot.local || (slot.staged && !slot.held) {
                 return None;
