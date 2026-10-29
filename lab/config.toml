@@ -20,5 +20,5 @@ bucket = "mica-lab"
 access_key_id = "micalab"
 secret_access_key = "micalab-secret"
 region = "us-east-1"
-prefix = "v2z"
+prefix = "v2"
 conditional_writes = true
