@@ -18,7 +18,7 @@ The disk's shared copy lives in an S3-compatible bucket. Each machine uses its l
 
 ## Quick start
 
-You need Linux 6.0 or later, systemd, an S3-compatible bucket, and a local SSD. To build mica, you also need Rust and libclang (`clang-devel` on Fedora; `libclang-dev` on Debian and Ubuntu).
+You need Linux 6.16 or later, systemd, an S3-compatible bucket, and a local SSD. To build mica, you also need Rust and libclang (`clang-devel` on Fedora; `libclang-dev` on Debian and Ubuntu).
 
 ```bash
 cargo install --git https://github.com/tanmoysrt/mica

@@ -36,6 +36,7 @@ mod setup;
 mod snapshot_commands;
 mod systemd;
 mod ublk_device;
+mod ublk_queue;
 
 use anyhow::{Result, bail};
 use clap::Parser;

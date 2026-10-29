@@ -4,7 +4,7 @@ How to install mica on a node, configure it, and run it day to day.
 
 ## Requirements
 
-- Linux 6.0 or later with the `ublk_drv` module. User recovery (restart without downtime) needs a kernel that supports `UBLK_F_USER_RECOVERY_REISSUE`.
+- Linux 6.16 or later with the `ublk_drv` module: mica needs `UBLK_F_AUTO_BUF_REG` and `UBLK_F_USER_COPY` (zero copy) and `UBLK_F_USER_RECOVERY_REISSUE` (restart without downtime).
 - systemd.
 - An S3-compatible bucket: Cloudflare R2, Ceph RGW or Garage. mica does not need conditional writes.
 - A local SSD for `/var/lib/mica`. XFS or btrfs is best: their reflink copies make chunk copies free.
@@ -47,6 +47,8 @@ It fails with a list of every missing field. Setup reads only the file, never th
 cargo install --git https://github.com/tanmoysrt/mica --force
 sudo ~/.cargo/bin/mica service setup --use-config-file
 ```
+
+Exception: a build with zero copy cannot take over a device that a build without it made, and the reverse. Detach all disks before you upgrade to the first zero-copy build, or before you go back to an older build. Otherwise the new daemon refuses the old device and logs why. The disk's data stays in its local folder; detach it with the old build.
 
 ## Configuration
 

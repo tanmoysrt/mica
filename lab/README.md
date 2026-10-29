@@ -56,5 +56,7 @@ Each script writes a log to `lab/results/<date>-local/`, or to the folder you gi
 | `bench/snap.sh` | Firecracker memory snapshots on a mica disk, restored with the File backend: cold, warm, with prefetch |
 | `bench/suite.sh <folder>` | host, vm and snap, then vm with Alpine |
 | `bench/compare.sh <ms> <folder>` | The suite for v0.2 and for v0.1 at one round trip |
+| `bench/zerocopy.sh <folder>` | Daemon RSS and CPU per operation on 8 disks: 1 MiB and 4 KiB reads and writes of local chunks |
+| `bench/datacheck.sh <folder> [ops]` | Random I/O checked against a model of the disk: chunk borders, parts never written, FUA, discard, write-zeroes, cold reads after a reattach |
 
 To run a v0.1 build: `lab/lab.sh deploy <binary>` with `PREFIX=""`, and `SKIP_FILL=1 ATTACH_ARGS=" "` for the suite. The two versions use different formats, so they use different bucket prefixes.

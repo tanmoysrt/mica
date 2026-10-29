@@ -1,15 +1,10 @@
 use crate::disk::Disk;
-use crate::queue_io;
+use crate::ublk_queue::serve_queue;
 use anyhow::{Context, Result, anyhow, bail};
+use io_uring::{IoUring, squeue};
 use libublk::ctrl::{UblkCtrl, UblkCtrlBuilder};
-use libublk::helpers::IoBuf;
-use libublk::io::{UblkDev, UblkQueue};
-use io_uring::{IoUring, opcode, squeue, types};
-use libublk::uring_async::ublk_submit_sqe_async;
-use libublk::{BufDesc, UblkError, UblkFlags, UblkUringData, sys};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::future::Future;
-use std::rc::Rc;
+use libublk::io::UblkDev;
+use libublk::{UblkError, UblkFlags, sys};
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread::JoinHandle;
@@ -20,11 +15,15 @@ const QUEUE_DEPTH: u16 = 64;
 /// One queue thread per CPU, up to this many. Parallel I/O then uses more
 /// than one CPU. A device taken over after a restart keeps its own count.
 const MAX_QUEUES: u16 = 4;
+/// The largest request. The daemon has no buffer of this size: it uses the
+/// request's own pages (see `queue_io::RequestBuffer`).
 const IO_BUFFER_BYTES: u32 = 512 << 10;
+/// Zero copy needs Linux 6.16 or later.
+const ZERO_COPY: u64 = (sys::UBLK_F_AUTO_BUF_REG | sys::UBLK_F_USER_COPY) as u64;
 
 /// Room in each queue's ring for the ublk commands and the file I/O that
 /// the queue thread does itself: one read or write per chunk part (a request
-/// can span this many chunks), then one sync per part for a FUA write.
+/// can span this many chunks), and the eventfd read.
 fn ring_depth(chunk_size: u32) -> u16 {
     let parts = IO_BUFFER_BYTES.div_ceil(chunk_size) + 1;
     (QUEUE_DEPTH as u32 * (parts + 2)).min(4096) as u16
@@ -51,7 +50,11 @@ impl UblkDevice {
     /// Takes over a device that a previous daemon left paused.
     pub fn recover(disk: Arc<Disk>, runtime: Handle, id: i32) -> Result<Self> {
         ensure_control_ring()?;
-        let result = UblkCtrl::new_simple(id)?.start_user_recover()?;
+        let ctrl = UblkCtrl::new_simple(id)?;
+        if ctrl.dev_info().flags & ZERO_COPY != ZERO_COPY {
+            bail!("ublk device {id} was made by an older mica without zero copy; remove it, or run that build to detach the disk");
+        }
+        let result = ctrl.start_user_recover()?;
         if result < 0 {
             bail!("start recovery of ublk device {id}: errno {}", -result);
         }
@@ -97,7 +100,7 @@ impl UblkDevice {
             .nr_queues(queue_count())
             .depth(QUEUE_DEPTH)
             .io_buf_bytes(IO_BUFFER_BYTES)
-            .ctrl_flags(sys::UBLK_F_USER_RECOVERY as u64 | sys::UBLK_F_USER_RECOVERY_REISSUE as u64);
+            .ctrl_flags(ZERO_COPY | sys::UBLK_F_USER_RECOVERY as u64 | sys::UBLK_F_USER_RECOVERY_REISSUE as u64);
         let builder = match recover_id {
             Some(id) => builder.id(id).dev_flags(UblkFlags::UBLK_DEV_F_RECOVER_DEV),
             None => builder.dev_flags(UblkFlags::UBLK_DEV_F_ADD_DEV),
@@ -178,170 +181,6 @@ fn set_device_params(dev: &mut UblkDev, size: u64, chunk_size: u32) {
         max_discard_segments: 1,
         ..Default::default()
     };
-}
-
-/// Runs on the queue thread. libublk drives one smol executor per queue,
-/// with one task per request tag.
-fn serve_queue(queue_id: u16, dev: &UblkDev, disk: &Arc<Disk>, runtime: &Handle) {
-    // Declared before the queue, so it outlives the io_uring read that points to it.
-    let mut wake_buffer = Box::new([0u8; 8]);
-    let waker = match QueueWaker::new() {
-        Ok(waker) => waker,
-        Err(error) => return log::error!("ublk queue {queue_id}: eventfd failed: {error}"),
-    };
-    let queue = match UblkQueue::new(queue_id, dev) {
-        Ok(queue) => Rc::new(queue),
-        Err(error) => return log::error!("ublk queue {queue_id} failed: {error}"),
-    };
-    let executor = Rc::new(smol::LocalExecutor::new());
-    let mut tasks = Vec::new();
-    for tag in queue.tags() {
-        let (queue, disk, runtime, waker) = (queue.clone(), disk.clone(), runtime.clone(), waker.clone());
-        tasks.push(executor.spawn(async move {
-            match serve_tag(&queue, tag, &disk, &runtime, &waker).await {
-                Ok(()) | Err(UblkError::QueueIsDown) => {}
-                Err(error) => log::error!("ublk tag {tag} failed: {error}"),
-            }
-        }));
-    }
-    let buffer = wake_buffer.as_mut_ptr();
-    executor.spawn(async move { waker.keep_reading(buffer).await }).detach();
-    let ticker = executor.clone();
-    smol::block_on(executor.run(async move {
-        let run_ops = || while ticker.try_tick() {};
-        let done = || tasks.iter().all(|task| task.is_finished());
-        if let Err(error) = libublk::wait_and_handle_io_events(&queue, Some(20), run_ops, done).await {
-            log::error!("ublk queue {queue_id} stopped: {error}");
-        }
-    }));
-}
-
-async fn serve_tag(
-    queue: &UblkQueue<'_>,
-    tag: u16,
-    disk: &Arc<Disk>,
-    runtime: &Handle,
-    waker: &QueueWaker,
-) -> Result<(), UblkError> {
-    let mut buffer = IoBuf::<u8>::new(queue.dev.dev_info.max_io_buf_bytes as usize);
-    queue.submit_io_prep_cmd(tag, BufDesc::Slice(buffer.as_slice()), 0, Some(&buffer)).await?;
-    loop {
-        let request = *queue.get_iod(tag);
-        let result = handle_request(request, buffer.as_mut_slice(), disk, runtime, waker).await;
-        queue.submit_io_commit_cmd(tag, BufDesc::Slice(buffer.as_slice()), result).await?;
-    }
-}
-
-/// Returns bytes done, or a negative errno.
-async fn handle_request(
-    request: sys::ublksrv_io_desc,
-    buffer: &mut [u8],
-    disk: &Arc<Disk>,
-    runtime: &Handle,
-    waker: &QueueWaker,
-) -> i32 {
-    let offset = request.start_sector << 9;
-    let len = (request.nr_sectors as usize) << 9;
-    let op = request.op_flags & 0xff;
-    let durable = request.op_flags & sys::UBLK_IO_F_FUA != 0;
-    // Local data is served on this thread. Anything that needs S3, a chunk
-    // that is not local yet, a FUA write, or a busy lock goes to tokio below.
-    if op == sys::UBLK_IO_OP_READ
-        && let Some(plan) = disk.plan_local_read(offset, len)
-    {
-        return queue_io::read_local(plan, &mut buffer[..len]).await;
-    }
-    // A FUA write goes to the engine. Its sync must take the one FLUSH path:
-    // Linux reports a writeback error only once to each open file, so two
-    // syncs at the same time could otherwise hide a failure from each other.
-    if op == sys::UBLK_IO_OP_WRITE
-        && !durable
-        && let Some(plan) = disk.plan_local_write(offset, len)
-    {
-        return queue_io::write_local(plan, &buffer[..len]).await;
-    }
-    let disk = disk.clone();
-    let outcome = match op {
-        sys::UBLK_IO_OP_READ => on_tokio(runtime, waker, async move { disk.read(offset, len).await })
-            .await
-            .map(|data| {
-                buffer[..len].copy_from_slice(&data);
-                len as i32
-            }),
-        sys::UBLK_IO_OP_WRITE => {
-            let data = buffer[..len].to_vec();
-            on_tokio(runtime, waker, async move {
-                match durable {
-                    true => disk.write_durable(offset, data).await?,
-                    false => disk.write(offset, data).await?,
-                }
-                Ok(len as i32)
-            })
-            .await
-        }
-        sys::UBLK_IO_OP_FLUSH => on_tokio(runtime, waker, async move { disk.flush().await.map(|_| 0) }).await,
-        sys::UBLK_IO_OP_DISCARD => {
-            on_tokio(runtime, waker, async move { disk.discard(offset, len as u64).await.map(|_| 0) }).await
-        }
-        sys::UBLK_IO_OP_WRITE_ZEROES => {
-            on_tokio(runtime, waker, async move { disk.write_zeroes(offset, len as u64).await.map(|_| 0) }).await
-        }
-        _ => Ok(-libc::EINVAL),
-    };
-    outcome.unwrap_or_else(|error| {
-        log::error!("I/O at {offset}+{len} failed: {error:#}");
-        -libc::EIO
-    })
-}
-
-/// The disk engine runs on tokio. The result must be in the channel before
-/// the queue thread wakes up. With a join handle, the thread could wake too
-/// early, see nothing, and sleep until the 20 s io_uring idle timeout.
-async fn on_tokio<T: Send + 'static>(
-    runtime: &Handle,
-    waker: &QueueWaker,
-    work: impl Future<Output = Result<T>> + Send + 'static,
-) -> Result<T> {
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    let waker = waker.clone();
-    runtime.spawn(async move {
-        let _ = sender.send(work.await);
-        waker.wake();
-    });
-    receiver.await.map_err(|_| anyhow!("the disk task stopped without a result"))?
-}
-
-/// The queue thread sleeps inside io_uring, so waking its smol task is not
-/// enough: only an io_uring completion wakes the thread. tokio writes to this
-/// eventfd, and the queue always has a read on it.
-#[derive(Clone)]
-struct QueueWaker {
-    fd: Arc<OwnedFd>,
-}
-
-impl QueueWaker {
-    fn new() -> Result<Self> {
-        let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC) };
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        Ok(Self { fd: Arc::new(unsafe { OwnedFd::from_raw_fd(fd) }) })
-    }
-
-    fn wake(&self) {
-        let one: u64 = 1;
-        unsafe { libc::write(self.fd.as_raw_fd(), (&one as *const u64).cast(), 8) };
-    }
-
-    async fn keep_reading(&self, buffer: *mut u8) {
-        loop {
-            let read = opcode::Read::new(types::Fd(self.fd.as_raw_fd()), buffer, 8).build();
-            match ublk_submit_sqe_async(read, UblkUringData::Target as u64).await {
-                Ok(result) if result >= 0 => {}
-                _ => break,
-            }
-        }
-    }
 }
 
 /// `/dev/mica/<disk-id>` stays the same name, while the `ublkbN` number can change.

@@ -10,7 +10,7 @@ This page tells you where each part of mica is. Read [docs/architecture.md](../d
 4. **`daemon.rs`** owns the attached disks. It attaches, detaches, and finishes work left from a crash.
 5. **`disk.rs`** is the disk engine: read, write, discard and flush. This is the most important file.
 6. **`checkpoint.rs`** uploads unsaved chunks and commits a new root.
-7. **`ublk_device.rs`** connects the kernel block device to the disk engine.
+7. **`ublk_device.rs`** and **`ublk_queue.rs`** connect the kernel block device to the disk engine.
 
 Then read the helper files in the table below when you need them.
 
@@ -70,8 +70,9 @@ Then read the helper files in the table below when you need them.
 | `node.rs` | `NodeIdentity`: the random node ID in `<data_dir>/node-id`, and the hostname. |
 | `local_state.rs` | `DiskFolder`: `<data_dir>/disks/<disk-id>/`, its `state` file (attached or orphaned). |
 | `local_io.rs` | Plans reads and writes that the queue thread can serve alone, from local data. |
-| `queue_io.rs` | Does those reads and writes with io_uring on the queue thread. |
-| `ublk_device.rs` | `UblkDevice`: start, recover and stop `/dev/ublkbN`. Maps each ublk request to a `Disk` call. Makes `/dev/mica/<disk-id>`. |
+| `queue_io.rs` | `RequestBuffer`: the pages of one ublk request. Local reads and writes with `ReadFixed` and `WriteFixed`, and copies through `/dev/ublkcN` for data that tokio has. |
+| `ublk_queue.rs` | The queue thread: one task per tag, maps each ublk request to a `Disk` call, `on_tokio` and `QueueWaker`. |
+| `ublk_device.rs` | `UblkDevice`: start, recover and stop `/dev/ublkbN` with zero copy. Makes `/dev/mica/<disk-id>`. |
 | `mount_tools.rs` | CLI helpers: `mkfs`, `mount`, `umount`, and search in `/proc/self/mounts`. |
 | `blocking.rs` | `blocking()`: runs file I/O on the tokio blocking pool. |
 
@@ -79,7 +80,7 @@ Then read the helper files in the table below when you need them.
 
 ### A guest write
 
-`ublk_device.rs` `handle_request` → `Disk::write` → `Disk::write_part`: `make_local` copies the base from the cache if needed, `hold_if_staged` keeps a copy for the running checkpoint, the data goes into the data file, and `finish_write` marks the data file and lists the chunk (`DirtyLog::note_write`).
+`ublk_queue.rs` `handle_request` → `Disk::write` → `Disk::write_part`: `make_local` copies the base from the cache if needed, `hold_if_staged` keeps a copy for the running checkpoint, the data goes into the data file, and `finish_write` marks the data file and lists the chunk (`DirtyLog::note_write`).
 
 ### A guest read
 
@@ -126,7 +127,7 @@ The CLI sends a `Mount` request. The daemon (`managed_mount::mount_with_unit`) c
 - Each chunk has its own async lock (`ChunkSlot` in `disk.rs`). A write holds it until the data is in the file. Thus a checkpoint cannot read a chunk while a write goes into it.
 - Only one checkpoint runs at a time (`checkpoint_running`).
 - File I/O runs on the blocking pool (`blocking.rs`).
-- ublk queue threads run a smol executor. A request that only needs local data is served on the queue thread with io_uring (`local_io.rs`, `queue_io.rs`). Other requests go to tokio in `on_tokio` in `ublk_device.rs`.
+- ublk queue threads run a smol executor. A request that only needs local data is served on the queue thread with io_uring (`local_io.rs`, `queue_io.rs`). Other requests go to tokio in `on_tokio` in `ublk_queue.rs`. Their data moves through `/dev/ublkcN` (`RequestBuffer::copy_in`, `copy_out`).
 - A local write holds its chunk locks until the data is in the files, the same rule as the tokio path.
 - A queue thread sleeps inside io_uring. Only an io_uring completion wakes it. When tokio finishes a request, it writes to an eventfd (`QueueWaker`) that the queue always reads. The result goes into a channel before this write, so the thread never wakes too early.
 - The daemon runs in its own mount namespace with slave propagation. Mounts made in the daemon stay inside it. Unmounts on the host still reach it.

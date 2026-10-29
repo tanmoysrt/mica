@@ -177,10 +177,18 @@ flowchart TD
 
 Each device has one queue thread per CPU, up to 4. A queue thread first tries to serve a request by itself:
 
-- **A read** whose chunks are all local (a dirty chunk, a cached chunk or zeros) is read with io_uring straight into the request buffer.
-- **A write** into local chunks is written with io_uring.
+- **A read** whose chunks are all local (a dirty chunk, a cached chunk or zeros) is read with io_uring straight into the request's pages. A part that was never written is read from `/dev/zero`.
+- **A write** into local chunks is written with io_uring straight from the request's pages.
 
 This needs no lock wait, no S3 and no other thread. Anything else goes to the disk engine on tokio: a chunk that is not local yet, a busy lock, a full local disk, a chunk that needs a held copy (see [Checkpoint](#checkpoint)), FUA writes, discards and flushes. A FUA write is a write and a FLUSH: every sync of a data file goes through FLUSH, one at a time, so a failed sync stops the disk before any later sync can report success.
+
+### Zero copy
+
+The daemon has no I/O buffers. The device uses `UBLK_F_AUTO_BUF_REG`: before a request reaches the daemon, the kernel registers the request's pages in the queue's io_uring as fixed buffer number `tag`. The queue thread reads and writes them in place with `ReadFixed` and `WriteFixed`. The commit unregisters them, so every operation on them ends before the commit.
+
+The device also uses `UBLK_F_USER_COPY`. A request that tokio serves has its data in memory: an S3 download, or a write that tokio does. The queue thread copies that data into the request's pages, or out of them, through `/dev/ublkcN`. This is the only copy. Its memory lives only while the request runs.
+
+If the kernel cannot register the pages, it still sends the request, marked with `UBLK_IO_F_NEED_REG_BUF`. mica serves it through tokio and the copy, and logs a count. A kernel before 6.16 does not have `UBLK_F_AUTO_BUF_REG` and cannot run mica.
 
 ## Flush
 

@@ -1,21 +1,22 @@
 # To do
 
-## ublk zero-copy
+## ublk zero copy (done, 2026-10-30)
 
-Today each request is copied once between the kernel and the daemon's buffer. With `UBLK_F_SUPPORT_ZERO_COPY` or `UBLK_F_AUTO_BUF_REG`, io_uring reads and writes the request's pages directly. libublk 0.4.8 and kernel 7.0 support both.
+Done as in `plans/ublk-zero-copy.md`: `UBLK_F_AUTO_BUF_REG` and `UBLK_F_USER_COPY`, no per-tag buffers. Results are in `lab/results/2026-10-30-zerocopy*`, and in the progress page.
 
-- Benefit: about 15% of one core at 1.6 GiB/s of 1 MiB local I/O. Under 3% for 4 KiB I/O. The S3 link and `fdatasync` set the speed, not the copy.
-- Work: local reads and writes on the queue thread become `READ_FIXED`/`WRITE_FIXED`. Cache misses and writes to chunks that are not local must finish on the queue ring, because the daemon no longer has the data in its buffer. Then a codex review and the crash test again.
-- Before starting: profile the 4-writer 1 MiB test with `perf`. Skip if the copy is under about 10% of CPU.
+Still open:
 
-Explore:
-
-- [ ] Prefer `UBLK_F_AUTO_BUF_REG` over manual buffer registration. Probe support and preserve a fallback. [Upstream discussion](https://lwn.net/Articles/1020732/)
-- [ ] Benchmark fixed-file registration for stable backing files separately from fixed-buffer zero-copy. [Loop example](https://github.com/ublk-org/libublk-rs/blob/main/examples/loop.rs)
+- [ ] Benchmark fixed-file registration for stable backing files. [Loop example](https://github.com/ublk-org/libublk-rs/blob/main/examples/loop.rs)
 - [ ] Measure per-queue CPU use with single and multiple submitters. Try extra threads per queue only for saturated workloads, and check shallow-I/O latency. [Benchmark caveats](https://github.com/ublk-org/libublk-rs#benchmarking-caveat-one-submitter-measures-one-queue)
-- [ ] Evaluate `UBLK_F_BATCH_IO` independently after zero-copy. Treat upstream null-target gains as framework measurements, not expected Mica gains. [Upstream benchmarks](https://lwn.net/Articles/1046200/)
-- [ ] Remeasure 4 KiB workloads rather than assume negligible gains. Test compressed cold reads, FUA/FLUSH, and daemon recovery for correctness. [Android evaluation](https://lpc.events/event/18/contributions/1710/attachments/1440/3070/LPC2024_ublk_zero_copy.pdf)
-- [ ] Defer shared-memory zero-copy unless a cooperating client requires it.
+- [ ] Evaluate `UBLK_F_BATCH_IO`. Treat upstream null-target gains as framework measurements, not expected mica gains. [Upstream benchmarks](https://lwn.net/Articles/1046200/)
+- [ ] FUA writes into local chunks still copy the request through `/dev/ublkcN`. Serve them on the queue thread only if a profile shows the copy.
+
+## Idle queue threads count as iowait
+
+A queue thread waits in `io_uring_enter` with requests in flight (the ublk fetch commands and the eventfd read). The kernel then counts the wait as iowait. Each attached disk adds up to 4 to the load average and to `procs_blocked`, and `/proc/pressure/io` reads about 95 % on an idle host (8 lab disks, 2026-10-30; v0.2c and zero copy alike). Host monitoring sees an I/O stall that does not exist.
+
+- Fix: wait with `IORING_ENTER_NO_IOWAIT` (Linux 6.15). libublk makes the wait in `wait_and_handle_io_events`, so this needs a libublk change.
+- Lab: check I/O pressure before disks attach, or use `vmstat` `bo`/`bi`.
 
 ## Keep attached disks fully cached
 
