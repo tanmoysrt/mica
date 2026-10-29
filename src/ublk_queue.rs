@@ -2,8 +2,8 @@ use crate::disk::Disk;
 use crate::queue_io::RequestBuffer;
 use anyhow::{Result, anyhow};
 use io_uring::{opcode, types};
-use libublk::io::{UblkDev, UblkQueue};
-use libublk::uring_async::ublk_submit_sqe_async;
+use libublk::io::{UblkDev, UblkQueue, with_task_io_ring_mut};
+use libublk::uring_async::{run_uring_tasks, ublk_reap_io_events_with_update_queue, ublk_submit_sqe_async, ublk_wake_task};
 use libublk::{BufDesc, UblkError, UblkUringData, sys};
 use std::fs::File;
 use std::future::Future;
@@ -11,7 +11,15 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tokio::runtime::Handle;
+
+/// How long an idle queue thread sleeps in io_uring before it looks again.
+const IDLE_WAIT: Duration = Duration::from_secs(20);
+const ENTER_GETEVENTS: u32 = 1 << 0;
+const ENTER_EXT_ARG: u32 = 1 << 3;
+/// Linux 6.15 and later.
+const ENTER_NO_IOWAIT: u32 = 1 << 7;
 
 /// Requests whose pages the kernel could not register, since start.
 static UNREGISTERED: AtomicU64 = AtomicU64::new(0);
@@ -51,7 +59,7 @@ pub fn serve_queue(queue_id: u16, dev: &UblkDev, disk: &Arc<Disk>, runtime: &Han
     smol::block_on(executor.run(async move {
         let run_ops = || while ticker.try_tick() {};
         let done = || tasks.iter().all(|task| task.is_finished());
-        if let Err(error) = libublk::wait_and_handle_io_events(&queue, Some(20), run_ops, done).await {
+        if let Err(error) = handle_io_events(&queue, run_ops, done).await {
             log::error!("ublk queue {queue_id} stopped: {error}");
         }
     }));
@@ -146,6 +154,40 @@ async fn handle_request(
         log::error!("I/O at {offset}+{len} failed: {error:#}");
         -libc::EIO
     })
+}
+
+/// `libublk::wait_and_handle_io_events`, but the wait does not count as
+/// iowait. An idle queue thread waits with requests in flight (its fetch
+/// commands), and the kernel would count each one as a task blocked on I/O:
+/// 4 per disk in the load average, and I/O pressure near 100 % on an idle
+/// host.
+async fn handle_io_events(queue: &UblkQueue<'_>, run_ops: impl Fn(), done: impl Fn() -> bool) -> Result<(), UblkError> {
+    let wait = || async { wait_for_completions(queue) };
+    let reap = |timed_out| {
+        ublk_reap_io_events_with_update_queue(queue, timed_out, None, |cqe| ublk_wake_task(cqe.user_data(), cqe))
+    };
+    run_uring_tasks(wait, reap, run_ops, done).await
+}
+
+/// Submits the queued operations and waits for one completion, up to
+/// `IDLE_WAIT`. Ok(true) means the wait timed out. A stopping queue does
+/// not wait and returns QueueIsDown.
+fn wait_for_completions(queue: &UblkQueue<'_>) -> Result<bool, UblkError> {
+    let stopping = queue.is_stopping();
+    let result = with_task_io_ring_mut(|ring| {
+        let timeout = types::Timespec::new().sec(IDLE_WAIT.as_secs());
+        let args = types::SubmitArgs::new().timespec(&timeout);
+        let pending = ring.submission().len() as u32;
+        let flags = ENTER_GETEVENTS | ENTER_EXT_ARG | ENTER_NO_IOWAIT;
+        // SubmitArgs has the layout of struct io_uring_getevents_arg.
+        unsafe { ring.submitter().enter(pending, u32::from(!stopping), flags, Some(&args)) }
+    });
+    match result {
+        _ if stopping => Err(UblkError::QueueIsDown),
+        Err(error) if error.raw_os_error() == Some(libc::ETIME) => Ok(true),
+        Err(error) => Err(UblkError::IOError(error)),
+        Ok(_) => Ok(false),
+    }
 }
 
 /// Rare: the kernel registers request pages unless it runs out of memory.
