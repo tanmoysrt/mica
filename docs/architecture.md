@@ -190,6 +190,10 @@ The device also uses `UBLK_F_USER_COPY`. A request that tokio serves has its dat
 
 If the kernel cannot register the pages, it still sends the request, marked with `UBLK_IO_F_NEED_REG_BUF`. mica serves it through tokio and the copy, and logs a count. A kernel before 6.16 does not have `UBLK_F_AUTO_BUF_REG` and cannot run mica.
 
+### Idle queue threads
+
+An idle queue thread waits in `io_uring_enter` with requests in flight: its fetch commands. The kernel counts such a wait as iowait by default. Then each attached disk adds up to 4 blocked tasks (`procs_blocked`), and `/proc/pressure/io` reads near 100 % on an idle host. So mica runs libublk's event loop with its own wait, which passes `IORING_ENTER_NO_IOWAIT` (Linux 6.15). The load average does not change either way, because io_uring waits are interruptible.
+
 ## Flush
 
 The device tells the kernel that it has a volatile write cache. So filesystems send FLUSH when they need durability (`fsync`, journal commits, `umount`).
