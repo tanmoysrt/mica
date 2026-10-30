@@ -15,7 +15,8 @@ Still open:
 
 A queue thread waits in `io_uring_enter` with requests in flight (the ublk fetch commands and the eventfd read). The kernel then counts the wait as iowait. Each attached disk adds up to 4 to the load average and to `procs_blocked`, and `/proc/pressure/io` reads about 95 % on an idle host (8 lab disks, 2026-10-30; v0.2c and zero copy alike). Host monitoring sees an I/O stall that does not exist.
 
-- Fix: wait with `IORING_ENTER_NO_IOWAIT` (Linux 6.15). libublk makes the wait in `wait_and_handle_io_events`, so this needs a libublk change.
+- Prototype: branch `no-iowait` runs libublk's event loop with its own wait, which passes `IORING_ENTER_NO_IOWAIT` (Linux 6.15). With 8 idle disks: 0 blocked tasks and 0 % I/O pressure. The data check passes.
+- Its A/B (lab/results/2026-10-30-zerocopy-flush-cold, -cold-flush2): queue-depth-1 local reads and writes the same or faster, cold reads the same, FLUSH p50 the same (720 µs). Idle write+fdatasync was 833/s against 922/s for v0.2c and 1045/s for zero copy (5 runs each), from a heavier tail. Not merged: it fixes host metrics, not speed, and adds an unsafe wait loop. Decide whether the metrics are worth it; if yes, measure the FLUSH tail again on a quiet host first.
 - Lab: check I/O pressure before disks attach, or use `vmstat` `bo`/`bi`.
 
 ## Keep attached disks fully cached
