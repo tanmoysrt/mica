@@ -50,11 +50,7 @@ impl UblkDevice {
     /// Takes over a device that a previous daemon left paused.
     pub fn recover(disk: Arc<Disk>, runtime: Handle, id: i32) -> Result<Self> {
         ensure_control_ring()?;
-        let ctrl = UblkCtrl::new_simple(id)?;
-        if ctrl.dev_info().flags & ZERO_COPY != ZERO_COPY {
-            bail!("ublk device {id} was made by an older mica without zero copy; remove it, or run that build to detach the disk");
-        }
-        let result = ctrl.start_user_recover()?;
+        let result = UblkCtrl::new_simple(id)?.start_user_recover()?;
         if result < 0 {
             bail!("start recovery of ublk device {id}: errno {}", -result);
         }

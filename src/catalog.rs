@@ -25,8 +25,8 @@ pub struct DiskSummary {
 pub struct SnapshotSummary {
     pub name: String,
     pub size: u64,
-    pub disk: Option<String>,
-    pub time: Option<String>,
+    pub disk: String,
+    pub time: String,
 }
 
 pub struct LoadedDisk {
@@ -84,8 +84,8 @@ impl<'a> Catalog<'a> {
         Snapshot {
             manifest: head.manifest,
             profile: head.profile,
-            disk: Some(disk_id.to_string()),
-            time: Some(crate::records::now_text()),
+            disk: disk_id.to_string(),
+            time: crate::records::now_text(),
         }
         .save(self.bucket, name)
         .await

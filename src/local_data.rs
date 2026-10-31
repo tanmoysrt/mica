@@ -14,8 +14,6 @@ const SEGMENT_BYTES: u64 = 1 << 30;
 const LOG_MAGIC: &[u8; 8] = b"MICADLG1";
 const LOG_HEADER: usize = 24;
 const LOG_FILES: [&str; 2] = ["log-a", "log-b"];
-/// Files of the layout before v0.2.1. Their data must be uploaded by that build.
-const OLD_LAYOUT: [&str; 3] = ["chunk", "frozen", "tmp"];
 
 /// The local data of one disk, in `<disk folder>/dirty/`:
 ///
@@ -52,7 +50,6 @@ impl LocalData {
     /// not logged yet. It survives a daemon crash, but not a reboot.
     pub fn open(dir: &Path, recent: &Path, disk_size: u64, chunk_size: u64) -> Result<(Self, Vec<usize>)> {
         create_dir_durable(dir)?;
-        refuse_old_layout(dir)?;
         let mut created = false;
         let hold_path = dir.join("hold");
         created |= !hold_path.exists();
@@ -224,37 +221,16 @@ pub fn create_dir_durable(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// True when the folder has any record of local changes, from this or the
-/// old layout, or the `recent` bitmap in /run has a bit set: in any session,
-/// since this only decides whether to keep the folder.
+/// True when the dirty log lists a chunk, or the `recent` bitmap in /run has
+/// a bit set: in any session, since this only decides whether to keep the folder.
 pub fn has_entries(dir: &Path, recent: &Path) -> Result<bool> {
     let bits = std::fs::read(recent)
         .is_ok_and(|data| data.get(RECENT_HEADER..).is_some_and(|bits| bits.iter().any(|byte| *byte != 0)));
     if bits {
         return Ok(true);
     }
-    let Ok(entries) = std::fs::read_dir(dir) else { return Ok(false) };
-    for entry in entries {
-        let path = entry?.path();
-        if path.extension().is_some_and(|extension| OLD_LAYOUT.iter().any(|old| extension == *old)) {
-            return Ok(true);
-        }
-    }
     let logged = LOG_FILES.iter().filter_map(|name| read_log(&dir.join(name)).ok().flatten()).any(|log| !log.entries.is_empty());
     Ok(logged)
-}
-
-fn refuse_old_layout(dir: &Path) -> Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.extension().is_some_and(|extension| OLD_LAYOUT.iter().any(|old| extension == *old)) {
-            bail!(
-                "{} holds local chunks of an older mica. Start that build to upload them, then detach",
-                dir.display()
-            );
-        }
-    }
-    Ok(())
 }
 
 /// The chunks with local data, in two files used in turn. A rewrite goes to the file not in use and is synced before any
@@ -778,13 +754,5 @@ mod tests {
         drop(data);
         let (_, listed) = LocalData::open(dir.path(), &session, 64 * CHUNK, CHUNK).unwrap();
         assert_eq!(listed, vec![3]);
-    }
-
-    #[test]
-    fn the_old_layout_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("00000001.chunk"), b"x").unwrap();
-        assert!(has_entries(dir.path(), &dir.path().join("run/recent")).unwrap());
-        assert!(LocalData::open(dir.path(), &dir.path().join("run/recent"), 64 * CHUNK, CHUNK).is_err());
     }
 }

@@ -19,8 +19,6 @@ pub struct CacheManager {
 impl CacheManager {
     pub fn load(root: PathBuf, bucket: Arc<Bucket>, limit: u64, reserve: u64) -> Result<Self> {
         let mut caches = HashMap::new();
-        // Keep the old shared cache available to pruning and the host safeguard.
-        caches.insert(String::new(), Arc::new(ChunkCache::load(root.join("cache"), limit, bucket.clone())?));
         let directory = root.join("disk-cache");
         std::fs::create_dir_all(&directory)?;
         std::fs::create_dir_all(root.join("cache-limits"))?;

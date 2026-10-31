@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 /// `disks/<disk-id>/head`: the current manifest of a disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Head {
-    #[serde(default)]
     pub limits: crate::disk_limits::DiskLimits,
     pub manifest: String,
     pub profile: Vec<u32>,
@@ -25,7 +24,6 @@ pub struct AttachedMarker {
     pub since: String,
     /// Random per attach. Two nodes that claim at the same moment both write
     /// a marker; the one that reads back another claim ID backs off.
-    #[serde(default)]
     pub claim_id: String,
 }
 
@@ -34,11 +32,9 @@ pub struct AttachedMarker {
 pub struct Snapshot {
     pub manifest: String,
     pub profile: Vec<u32>,
-    /// The disk it was taken from, and when. Older snapshots do not have them.
-    #[serde(default)]
-    pub disk: Option<String>,
-    #[serde(default)]
-    pub time: Option<String>,
+    /// The disk it was taken from, and when.
+    pub disk: String,
+    pub time: String,
 }
 
 impl Head {
@@ -132,12 +128,5 @@ mod tests {
         assert_ne!(a.is_ok(), b.is_ok());
         let head = Head::load(&bucket, "disk").await.unwrap().unwrap();
         assert_eq!(head.manifest, if a.is_ok() { first.manifest } else { second.manifest });
-    }
-
-    #[test]
-    fn old_heads_have_default_limits() {
-        let head: Head = serde_json::from_str(r#"{"manifest":"sha256:unused","profile":[],"seq":0,"node":"old","time":"now"}"#).unwrap();
-        assert_eq!(head.limits.cache_bytes, None);
-        assert_eq!(head.limits.dirty_bytes, None);
     }
 }

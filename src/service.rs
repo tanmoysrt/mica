@@ -30,11 +30,7 @@ pub enum ServiceCommand {
         force: bool,
     },
     /// Restart mica; attached disks keep working
-    Restart {
-        /// Restart even if a disk cannot keep its device
-        #[arg(long)]
-        force: bool,
-    },
+    Restart,
     /// Show the service and the attached disks
     Status,
     /// Show the logs
@@ -78,12 +74,7 @@ pub async fn run(command: ServiceCommand, config_path: &Path, config: &Config) -
             }
             systemd::systemctl(&["stop", SERVICE_UNIT])?;
         }
-        ServiceCommand::Restart { force } => {
-            if !force {
-                refuse_if_not_recoverable(config).await?;
-            }
-            systemd::systemctl(&["restart", SERVICE_UNIT])?;
-        }
+        ServiceCommand::Restart => systemd::systemctl(&["restart", SERVICE_UNIT])?,
         ServiceCommand::Status => status(config).await,
         ServiceCommand::Logs { follow } => logs(follow)?,
     }
@@ -166,23 +157,6 @@ async fn refuse_if_disks_attached(config: &Config, action: &str) -> Result<()> {
         "cannot {action}: disks are attached here: {}. Detach or unmount them first{hint}",
         names.join(", ")
     )
-}
-
-/// Devices made by an older mica cannot be taken over, and would die in a restart.
-pub async fn refuse_if_not_recoverable(config: &Config) -> Result<()> {
-    let disks = attached_disks(config).await;
-    let blocked: Vec<String> = disks
-        .iter()
-        .filter(|disk| disk["recoverable"] != true)
-        .map(|disk| disk["disk"].as_str().unwrap_or("?").to_string())
-        .collect();
-    if !blocked.is_empty() {
-        bail!(
-            "cannot restart: these disks would lose their device: {}. Detach them first, or use --force",
-            blocked.join(", ")
-        );
-    }
-    Ok(())
 }
 
 fn service_unit_text(config_arg: &str, memory_high: &str) -> String {

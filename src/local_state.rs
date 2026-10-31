@@ -14,7 +14,6 @@ pub enum LocalStatus {
 struct StateFile {
     status: LocalStatus,
     /// The ublk device number, so a restarted daemon can take the device over.
-    #[serde(default)]
     ublk_id: Option<i32>,
 }
 

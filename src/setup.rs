@@ -70,7 +70,7 @@ fn is_group_member(user: &str) -> bool {
 /// Loads the module now and at every boot.
 fn load_ublk_module() -> Result<()> {
     let status = std::process::Command::new("modprobe").arg("ublk_drv").status().context("run modprobe")?;
-    ensure!(status.success(), "cannot load the ublk_drv kernel module (needs Linux 6.0 or later)");
+    ensure!(status.success(), "cannot load the ublk_drv kernel module (needs Linux 6.16 or later)");
     std::fs::write("/etc/modules-load.d/mica.conf", "ublk_drv\n")?;
     println!("  ok  ublk_drv is loaded, and loads at boot");
     Ok(())
@@ -196,7 +196,6 @@ fn install_binary() -> Result<()> {
 /// Its devices pause for a moment and continue.
 async fn start_service(config: &Config) -> Result<()> {
     if systemd::systemctl_check(&["is-active", "--quiet", SERVICE_UNIT]) {
-        service::refuse_if_not_recoverable(config).await?;
         systemd::systemctl(&["enable", SERVICE_UNIT])?;
         systemd::systemctl(&["restart", SERVICE_UNIT])?;
     } else {

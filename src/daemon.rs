@@ -290,7 +290,6 @@ impl Daemon {
                     "device": attached.device.as_ref().map(|_| &attached.link),
                     "ublk": attached.device.as_ref().map(|device| &device.path),
                     "blank": attached.disk.is_blank(),
-                    "recoverable": attached.device.is_some(),
                     "status": attached.disk.status(),
                 })
             })

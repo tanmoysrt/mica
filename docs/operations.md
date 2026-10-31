@@ -48,8 +48,6 @@ cargo install --git https://github.com/tanmoysrt/mica --force
 sudo ~/.cargo/bin/mica service setup --use-config-file
 ```
 
-Exception: a build with zero copy cannot take over a device that a build without it made, and the reverse. Detach all disks before you upgrade to the first zero-copy build, or before you go back to an older build. Otherwise the new daemon refuses the old device and logs why. The disk's data stays in its local folder; detach it with the old build.
-
 ## Configuration
 
 `/etc/mica/config.toml`:
@@ -254,5 +252,3 @@ A disk can expose 50 GiB while retaining only 500 MiB of clean data locally: `mi
 Clean caches are independent per disk. This makes accounting and eviction predictable, at the cost of storing duplicate clean chunks locally when disks share an image. S3 chunks and metadata pages remain shared. Explicit limits live in the disk head; disks without explicit limits use `disk_cache_limit_mib` and `dirty_limit_gib` on the current node. Clones use their own supplied limits or node defaults.
 
 After committing writes, mica copies saved chunks to that disk's clean cache, removes them from the dirty log, and frees their data-file ranges. A reconciler runs every second to trim caches, retry reclamation, and request checkpoints under space pressure. `cache_limit_gib` is the aggregate host safeguard. `local_reserve_mib` is free filesystem space to preserve; if clean-cache eviction cannot restore it, new writes wait while checkpointing continues. This is a periodic safeguard, not a filesystem quota: in-flight I/O, metadata, checkpoint copies, open evicted files, and other applications can consume additional space.
-
-Upgrading does not change the root, page, chunk, or dirty-log formats. Existing heads without limits use the new per-disk default of 1 GiB. The old shared `cache/` remains disposable and is included in host accounting and `mica cache prune`; new reads populate `disk-cache/<disk>/`. Set per-disk limits explicitly before moving to a host whose defaults differ.

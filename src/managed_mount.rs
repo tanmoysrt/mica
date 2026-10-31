@@ -15,7 +15,6 @@ use std::sync::Arc;
 pub struct MountSpec {
     pub path: PathBuf,
     pub filesystem: String,
-    #[serde(default)]
     pub owner: Option<FolderOwner>,
 }
 

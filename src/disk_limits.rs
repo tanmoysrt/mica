@@ -2,7 +2,6 @@ use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
-#[serde(default)]
 pub struct DiskLimits {
     pub cache_bytes: Option<u64>,
     pub dirty_bytes: Option<u64>,

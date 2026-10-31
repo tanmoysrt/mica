@@ -266,7 +266,7 @@ These commands need root.
 | `setup --use-config-file` | The same, without questions. Fails with a list of missing fields. |
 | `start` | Starts mica |
 | `stop [--force]` | Stops mica. Refuses while disks are attached: their devices would pause until mica starts again. |
-| `restart [--force]` | Restarts mica. Attached disks pause for about a second and keep working. |
+| `restart` | Restarts mica. Attached disks pause for about a second and keep working. |
 | `status` | systemd state, attached disks and S3 requests |
 | `logs [-f]` | Logs of mica and its mount units |
 | `enable` / `disable` | Start mica at boot, or not |
