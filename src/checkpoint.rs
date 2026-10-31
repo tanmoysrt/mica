@@ -159,6 +159,7 @@ impl Disk {
         let upload_all = async {
             let results: Vec<Result<Option<UploadedChunk>>> = futures::stream::iter(pending.iter().copied())
                 .map(|index| async move {
+                    let _slot = self.bucket.upload_slot().await?;
                     let Some(staged) = self.stage(index).await? else { return Ok(None) };
                     let uploaded = self.upload(index, staged).await?;
                     done_list.lock().unwrap().push(index);
@@ -384,6 +385,7 @@ impl Disk {
     /// chunk is checked. One that is missing and changed since has no copy:
     /// the checkpoint fails, and the next one uploads the chunk again.
     async fn repair_chunk(&self, index: usize, hash: ContentHash) -> Result<bool> {
+        let _slot = self.bucket.upload_slot().await?;
         if self.bucket.exists(&keys::chunk(&hash)).await? {
             return Ok(false);
         }

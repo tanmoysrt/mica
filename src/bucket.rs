@@ -8,6 +8,17 @@ use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload}
 use serde::Serialize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::{Semaphore, SemaphorePermit};
+
+/// Chunk uploads in flight on this node, over all disks. Without a limit, many
+/// disks overload the store, and its small requests time out too: the GC
+/// activity, the attached marker, the head.
+const UPLOADS: usize = 64;
+/// Chunk downloads in flight on this node, over all disks.
+const DOWNLOADS: usize = 128;
+/// The part of `DOWNLOADS` that read-ahead and the fill can use, so that
+/// reads always find a slot soon.
+const BACKGROUND_DOWNLOADS: usize = 32;
 
 /// One object from a listing. `age_secs` is the time since its last write.
 pub struct ObjectInfo {
@@ -23,6 +34,9 @@ pub struct Bucket {
     prefix: String,
     conditional_writes: bool,
     requests: RequestCounters,
+    upload_slots: Semaphore,
+    download_slots: Semaphore,
+    background_slots: Semaphore,
 }
 
 /// S3 requests since the daemon started. Providers bill per request.
@@ -56,6 +70,9 @@ impl Bucket {
             prefix: String::new(),
             conditional_writes: true,
             requests: RequestCounters::default(),
+            upload_slots: Semaphore::new(UPLOADS),
+            download_slots: Semaphore::new(DOWNLOADS),
+            background_slots: Semaphore::new(BACKGROUND_DOWNLOADS),
         }
     }
 
@@ -75,7 +92,24 @@ impl Bucket {
             prefix: config.prefix.trim_matches('/').to_string(),
             conditional_writes: config.conditional_writes,
             requests: RequestCounters::default(),
+            upload_slots: Semaphore::new(UPLOADS),
+            download_slots: Semaphore::new(DOWNLOADS),
+            background_slots: Semaphore::new(BACKGROUND_DOWNLOADS),
         })
+    }
+
+    /// Take it before the chunk is read: chunks that wait for an upload then
+    /// use no memory, and the guest writes them without a held copy.
+    pub async fn upload_slot(&self) -> Result<SemaphorePermit<'_>> {
+        Ok(self.upload_slots.acquire().await?)
+    }
+
+    pub async fn download_slot(&self) -> Result<SemaphorePermit<'_>> {
+        Ok(self.download_slots.acquire().await?)
+    }
+
+    pub async fn background_slot(&self) -> Result<SemaphorePermit<'_>> {
+        Ok(self.background_slots.acquire().await?)
     }
 
     pub fn request_counts(&self) -> RequestCounts {

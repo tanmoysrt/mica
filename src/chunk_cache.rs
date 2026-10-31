@@ -179,6 +179,7 @@ impl ChunkCache {
                 _ => break,
             }
         }
+        let _background = self.bucket.background_slot().await?;
         let _slot = self.download_slots.acquire().await?;
         let _busy = (kind == Fetch::Likely).then(|| self.busy());
         let lock = self.download_lock(hash);
@@ -309,11 +310,11 @@ impl ChunkCache {
     }
 
     async fn download(self: &Arc<Self>, hash: &ContentHash) -> Result<Arc<File>> {
-        let packed = self
-            .bucket
-            .get(&keys::chunk(hash))
-            .await?
-            .ok_or_else(|| anyhow!("chunk {hash} is missing in S3"))?;
+        let packed = {
+            let _node_slot = self.bucket.download_slot().await?;
+            self.bucket.get(&keys::chunk(hash)).await?
+        }
+        .ok_or_else(|| anyhow!("chunk {hash} is missing in S3"))?;
         let expected = *hash;
         let data = blocking(move || {
             let data = codec::unpack(&packed, MAX_CHUNK_SIZE as usize)?;

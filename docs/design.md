@@ -543,7 +543,8 @@ The checkpoint reads `gc/lock` before `gc/last`, never at the same time. A GC wr
 | Prefetch on attach | The full profile (`prefetch_on_attach`) |
 | Background fill | On (`background_fill`) |
 | Downloads | 64 for reads, 16 for likely reads, 32 for the fill (8 MiB for each disk) |
-| Upload parallelism | 64 MiB of chunks: 64 PUTs of 256 KiB, 16 of 4 MiB |
+| Upload parallelism | For each disk, 64 MiB of chunks: 64 PUTs of 256 KiB, 16 of 4 MiB. On the node, at most 64 chunks over all disks |
+| Download parallelism | On the node, at most 128 chunks, of which at most 32 for read-ahead and the fill |
 | Compression | zstd level 1 for chunks, level 3 for pages |
 
 ## 19. Code layout
