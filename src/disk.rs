@@ -776,12 +776,14 @@ impl Disk {
         }
     }
 
-    /// Frees saved chunks after copying them to the clean cache. The dirty log
-    /// drops them: a crash must not bring them back as local. Their space
-    /// is freed after the reads that may still use it end.
+    /// Saved chunks stay in the data files up to the disk's cache budget, so
+    /// a rewrite needs no copy and no download. Over it, or when the host is
+    /// short of space, the oldest go to the clean cache. The dirty log drops
+    /// them: a crash must not bring them back as local. Their space is freed
+    /// after the reads that may still use it end.
     pub(crate) async fn free_saved_chunks(&self) -> Result<()> {
         let mut freed = std::mem::take(&mut *self.unpunched.lock().unwrap());
-        while self.local_chunks.load(Ordering::SeqCst) > 0 {
+        while self.saved_over_budget() {
             let Some(index) = self.saved_local.lock().unwrap().pop_front() else { break };
             let mut slot = self.slot(index).await?.lock_owned().await;
             slot.queued_for_eviction = false;
@@ -823,6 +825,12 @@ impl Disk {
             drop(slot);
         }
         Ok(())
+    }
+
+    fn saved_over_budget(&self) -> bool {
+        let local = self.local_chunks.load(Ordering::SeqCst);
+        let saved = local.saturating_sub(self.unsaved_chunks.load(Ordering::SeqCst)) as u64;
+        saved * self.chunk_size > self.cache.limit_bytes() || (saved > 0 && self.host_pressure.load(Ordering::Acquire))
     }
 
     /// Copies every saved local chunk into the cache, before a detach

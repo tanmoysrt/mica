@@ -81,7 +81,7 @@ The guest writes a chunk in place while a checkpoint uploads it. So the checkpoi
 
 ### Local space is freed only when nothing can need it
 
-A saved chunk leaves the data files only when local data is over its limit. It goes into the cache first. Then the dirty log is rewritten without it: a crash must not bring it back as local. Then mica waits until no read that started earlier can still use its range, and punches the range out.
+A saved chunk leaves the data files only when saved local data is over the disk's cache budget, or the host is short of space. It goes into the cache first. Then the dirty log is rewritten without it: a crash must not bring it back as local. Then mica waits until no read that started earlier can still use its range, and punches the range out.
 
 ### A flush keeps its promise, or the disk stops
 

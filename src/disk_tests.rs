@@ -59,9 +59,34 @@ async fn blocked_writers_wake_on_terminal_failures() {
 }
 
 #[tokio::test]
+async fn saved_chunks_stay_local_up_to_the_cache_budget() {
+    let root = tempfile::tempdir().unwrap();
+    let disk = open_disk(root.path()).await;
+    disk.write(0, vec![1; (2 * CHUNK) as usize]).await.unwrap();
+    disk.checkpoint().await.unwrap();
+    assert_eq!(disk.local_chunks.load(Ordering::SeqCst), 2);
+    disk.cache.set_limit(CHUNK);
+    disk.free_saved_chunks().await.unwrap();
+    assert_eq!(disk.local_chunks.load(Ordering::SeqCst), 1);
+    assert_eq!(disk.read(0, (2 * CHUNK) as usize).await.unwrap(), vec![1; (2 * CHUNK) as usize]);
+}
+
+#[tokio::test]
+async fn host_pressure_frees_saved_chunks() {
+    let root = tempfile::tempdir().unwrap();
+    let disk = open_disk(root.path()).await;
+    disk.write(0, vec![1; CHUNK as usize]).await.unwrap();
+    disk.checkpoint().await.unwrap();
+    disk.host_pressure.store(true, Ordering::Release);
+    disk.free_saved_chunks().await.unwrap();
+    assert_eq!(disk.local_chunks.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn checkpoints_release_saved_local_chunks() {
     let root = tempfile::tempdir().unwrap();
     let disk = open_disk(root.path()).await;
+    disk.cache.set_limit(0);
     for value in 1..10 {
         disk.write(0, vec![value; CHUNK as usize]).await.unwrap();
         disk.checkpoint().await.unwrap();
@@ -146,7 +171,7 @@ async fn changing_limits_preserves_them_through_checkpoint_and_resize() {
     disk.grow_to(16 * CHUNK).await.unwrap();
     disk.checkpoint().await.unwrap();
     assert!(disk.cache.bytes() <= CHUNK);
-    assert_eq!(disk.local_chunks.load(Ordering::SeqCst), 0);
+    assert_eq!(disk.local_chunks.load(Ordering::SeqCst), 1);
     let head = crate::records::Head::load(&disk.bucket, "test").await.unwrap().unwrap();
     assert_eq!(head.limits.cache_bytes, Some(CHUNK));
     assert_eq!(head.limits.dirty_bytes, Some(2 * CHUNK));
