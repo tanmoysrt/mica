@@ -8,7 +8,6 @@ Still open:
 
 - [ ] Benchmark fixed-file registration for stable backing files. [Loop example](https://github.com/ublk-org/libublk-rs/blob/main/examples/loop.rs)
 - [ ] Measure per-queue CPU use with single and multiple submitters. Try extra threads per queue only for saturated workloads, and check shallow-I/O latency. [Benchmark caveats](https://github.com/ublk-org/libublk-rs#benchmarking-caveat-one-submitter-measures-one-queue)
-- [ ] Evaluate `UBLK_F_BATCH_IO`. Treat upstream null-target gains as framework measurements, not expected mica gains. [Upstream benchmarks](https://lwn.net/Articles/1046200/)
 - [ ] FUA writes into local chunks still copy the request through `/dev/ublkcN`. Serve them on the queue thread only if a profile shows the copy.
 
 ## Idle queue threads count as iowait (done, 2026-10-30)
@@ -35,6 +34,5 @@ Idea: a cache mode with no LRU eviction. Every chunk of an attached disk stays l
 
 - On btrfs, a synced 4 KiB write costs about 50 µs more in a 1 GiB data file than in a new small file (idle write plus `fdatasync` 3% slower than v0.2a on a quiet host). Smaller data files do not help. Check XFS and ext4.
 - In the lab, RustFS shares the btrfs and SSD with the lab daemon, so an upload slows the daemon's syncs. A loop-mounted XFS for RustFS did not help.
-- A page that GC deletes between commit and repair is lost on a power cut (also in v0.2a).
 - Without conditional writes in S3, two GCs can still overlap.
 - No crash-test baseline run on v0.2a.

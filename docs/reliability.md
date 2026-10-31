@@ -26,7 +26,7 @@ This page states what mica guarantees, what happens in each kind of failure, and
 | A chunk in S3 is corrupt | The hash check fails, and the read fails with an I/O error. | Nothing is served silently wrong |
 | The node loses power during a write | At start, only the chunks that the durable dirty log lists are local. Every other range of the data files is punched out. The next checkpoint compares each listed chunk with its committed hash. Cache files are checked by hash before their first read. | Writes the guest did not flush |
 | mica crashes, the node stays up | The kernel holds the device's I/O. The next daemon takes it over. The page cache still has every write, and `recent` lists the chunks that the log does not list yet. | None |
-| GC deletes a chunk or page while a checkpoint commits it | The checkpoint sees that a GC ran. It waits for that GC to end, checks every committed chunk and page, and uploads a missing one again. | None, unless the node dies in the seconds before the repair |
+| GC deletes a chunk or page while a checkpoint commits it | The checkpoint sees that a GC ran. Before it writes the head, it waits for that GC to end, checks every new chunk and page, and uploads a missing one again. | None |
 
 ## Why each step is in its order
 
@@ -158,7 +158,7 @@ GC deletes chunks, pages and roots that no disk, snapshot or kept checkpoint nee
 
 **The protections:**
 
-1. **Repair after commit.** The race needs a GC that runs during the checkpoint. A GC writes `gc/last` after its last delete, and before it deletes `gc/lock`. A checkpoint reads `gc/lock`, then `gc/last`, at its start and after the head PUT. If a GC runs at the end, the checkpoint waits for it to end, up to 10 minutes. If a GC ran, the checkpoint checks every chunk and page it committed, and uploads a missing one again. It frees the local copies only when S3 has them all. This closes the race: the data is never only in a deleted object. What remains is the node dying in the seconds between GC's delete and the repair. When no GC ran, the checkpoint skips the check. v0.1 sent a HEAD for every committed chunk on every checkpoint.
+1. **Repair before commit.** The race needs a GC that runs during the checkpoint. A GC writes `gc/last` after its last delete, and before it deletes `gc/lock`. A checkpoint reads `gc/lock`, then `gc/last`, at its start and just before the head PUT. If a GC runs then, the checkpoint waits for it to end, up to 10 minutes. If a GC ran, the checkpoint checks every chunk and page it uploaded, and uploads a missing one again. Only then does it write the head, so a head never names an object that this GC deleted, also after a power cut. A GC that starts after this look finds the new objects young. The checkpoint looks once more after the head PUT, for a checkpoint longer than the grace period. It frees the local copies only when S3 has them all.
 2. **Grace period.** GC deletes only objects older than 24 hours. A checkpoint takes minutes, so its new chunks are always young.
 3. **The upload rule.** A checkpoint skips the upload of a chunk only when the disk's current root has it at the same place. It uploads any other chunk again, even if S3 may have it. That chunk could be garbage that GC is about to delete. The new upload makes it young again. Pages are always uploaded.
 4. **A second look.** Just before each delete, GC reads the object's age again. This makes the race rare; the repair makes it harmless.

@@ -310,8 +310,8 @@ Steps:
 4. **Pages.** For each page with a changed chunk, copy the committed page, set the new hashes, and PUT it to `pages/`.
 5. **Root.** Copy the committed root. Set the new page hashes. PUT it to `manifests/`.
 6. **Check owner.** GET `attached`. It must have our `node_id`.
-7. **Commit.** PUT the new `head` with `seq + 1` and the current read profile.
-8. **Repair.** Read GC activity again. If a GC ran during the checkpoint, wait until it ends (at most 10 minutes; if it still runs, the checkpoint fails and is retried). Then HEAD every committed page and chunk, and upload a missing one again: a page from the page store, a chunk from the data file if the guest did not write it since its stage, else from its held copy. A chunk that is missing and has neither fails the checkpoint: its chunk stays unsaved, and the next checkpoint uploads it again. That can happen only to a chunk released early in a checkpoint that ran longer than the GC grace.
+7. **Repair.** Read GC activity again. If a GC ran during the checkpoint, wait until it ends (at most 10 minutes; if it still runs, the checkpoint fails and is retried). Then HEAD every new page and chunk, and upload a missing one again, then look again. A chunk comes from its stage or held copy. If the copy is gone, the checkpoint fails and is retried.
+8. **Commit.** PUT the new `head` with `seq + 1` and the current read profile. Then read GC activity once more, and repair again if a GC started since step 7. This covers a checkpoint longer than the grace period.
 9. **Finish.** Each chunk that the guest did not write since its stage is saved. Drop held copies. Saved chunks stay in the data files up to the disk's cache budget. Over it, copy the oldest into the disk's clean cache, rewrite the log without them, wait for read passes, then punch out their ranges. The reconciler retries incomplete reclamation.
 
 **Why an upload can be safe early.** GC deletes an object only if it was older than the grace period when GC checked it, just before the delete. A PUT makes the age new. So GC can delete our upload only if that GC was running when the PUT ended. A GC writes `gc/lock` before it lists anything. Thus if a read of GC activity after the PUT shows no lock and the same `gc/last`, no GC was running when the PUT ended, and none ran in between.
@@ -332,7 +332,7 @@ A chunk that the guest writes many times, such as the journal, goes up at most o
 
 ### Cost
 
-For one checkpoint: one PUT for each dirty chunk, one PUT for each changed page, one PUT for the root and one PUT for the head. Also four small requests for the GC activity and one GET for the marker. A checkpoint of a 4 KiB write to a 100 GiB disk uploads one chunk, one page of 32 KiB and a root of 12.5 KiB, both before compression.
+For one checkpoint: one PUT for each dirty chunk, one PUT for each changed page, one PUT for the root and one PUT for the head. Also six small requests for the GC activity and one GET for the marker. A checkpoint of a 4 KiB write to a 100 GiB disk uploads one chunk, one page of 32 KiB and a root of 12.5 KiB, both before compression.
 
 ## 13. Attach and detach
 

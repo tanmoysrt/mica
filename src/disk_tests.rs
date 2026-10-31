@@ -86,6 +86,33 @@ async fn a_detach_caches_only_the_newest_saved_chunks() {
 }
 
 #[tokio::test]
+async fn the_head_never_names_a_page_that_a_gc_deleted() {
+    let root = tempfile::tempdir().unwrap();
+    let disk = open_disk(root.path()).await;
+    disk.write(0, vec![1; CHUNK as usize]).await.unwrap();
+    disk.bucket.put(&keys::gc_lock(), "{}".into()).await.unwrap();
+    let checkpoint = disk.checkpoint();
+    tokio::pin!(checkpoint);
+    // The checkpoint uploads its page, then waits for the GC.
+    assert!(tokio::time::timeout(Duration::from_millis(500), &mut checkpoint).await.is_err());
+    let pages = disk.bucket.list_all("pages").await.unwrap();
+    assert!(!pages.is_empty());
+    assert!(crate::records::Head::load(&disk.bucket, "test").await.unwrap().is_none());
+    for page in pages {
+        disk.bucket.delete(&page.key).await.unwrap();
+    }
+    let last = r#"{"run":"gc-1","node":"other","finished":"now"}"#;
+    disk.bucket.put(&keys::gc_last(), last.into()).await.unwrap();
+    disk.bucket.delete(&keys::gc_lock()).await.unwrap();
+    checkpoint.await.unwrap();
+    let manifest = disk.committed.lock().unwrap().manifest.clone();
+    assert_eq!(crate::records::Head::load(&disk.bucket, "test").await.unwrap().unwrap().seq, manifest.seq);
+    for page in manifest.pages.iter().flatten() {
+        assert!(disk.bucket.exists(&keys::page(page)).await.unwrap());
+    }
+}
+
+#[tokio::test]
 async fn host_pressure_frees_saved_chunks() {
     let root = tempfile::tempdir().unwrap();
     let disk = open_disk(root.path()).await;

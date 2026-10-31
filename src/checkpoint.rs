@@ -88,6 +88,8 @@ impl Disk {
     async fn commit(&self, uploaded: &Uploaded, gc_before: GcActivity, started: Instant) -> Result<()> {
         let (manifest, manifest_hash, profile, new_pages) = self.commit_root(uploaded).await?;
         self.confirm_ownership().await?;
+        // Before the head: after a power cut, it must not name a deleted object.
+        let gc_checked = self.repair_after_gc(uploaded, &new_pages, gc_before).await?;
         let limits = *self.limits.lock().unwrap();
         Head::new(&manifest_hash, profile.clone(), manifest.seq, &self.node.hostname)
             .with_limits(limits)
@@ -103,22 +105,33 @@ impl Disk {
         let saved_reads = profile.len();
         *self.committed.lock().unwrap() = Committed { manifest, manifest_hash, profile };
         self.profile.mark_saved(saved_reads);
-        // GC can check a chunk's age before our upload and delete it after.
-        // That needs a GC that ran during this checkpoint. Only then are the
-        // committed chunks checked, after that GC ends, so that none of its
-        // deletes comes later. The source is the data file, or the hold file
-        // for a chunk the guest wrote since its stage.
-        let gc_after = GcActivity::finished(&self.bucket).await?;
-        // A GC that still runs could delete after the check. The chunks stay
-        // unsaved, so the next checkpoint uploads them again.
-        if gc_after.is_running() {
-            bail!("disk {}: a GC still runs after the wait; the checkpoint is retried", self.id);
-        }
-        if gc_after.may_have_deleted_since(&gc_before) {
-            self.repair_missing_pages(&new_pages).await?;
+        // Again after the head: in a checkpoint longer than the GC grace, a GC
+        // that started just now can find our first uploads old.
+        self.repair_after_gc(uploaded, &new_pages, gc_checked).await.map(|_| ())
+    }
+
+    /// GC can check an object's age before our upload and delete it after.
+    /// That needs a GC that ran since `seen`. Only then are the objects checked,
+    /// after that GC ends, so that none of its deletes comes later. A chunk's
+    /// source is the data file, or the hold file if the guest wrote it since
+    /// its stage. A repair can overlap the next GC, so each one is followed by
+    /// a new look. Returns the last look.
+    async fn repair_after_gc(&self, uploaded: &Uploaded, pages: &[ContentHash], mut seen: GcActivity) -> Result<GcActivity> {
+        for _ in 0..REPAIR_ROUNDS {
+            let now = GcActivity::finished(&self.bucket).await?;
+            // A GC that still runs could delete after the check. The chunks stay
+            // unsaved, so the next checkpoint uploads them again.
+            if now.is_running() {
+                bail!("disk {}: a GC still runs after the wait; the checkpoint is retried", self.id);
+            }
+            if !now.may_have_deleted_since(&seen) {
+                return Ok(now);
+            }
+            self.repair_missing_pages(pages).await?;
             self.repair_missing_chunks(uploaded).await?;
+            seen = now;
         }
-        Ok(())
+        bail!("disk {}: new GCs keep running during the commit; the checkpoint is retried", self.id)
     }
 
     /// The chunks not written in the last `HOT_CHUNK` time. A chunk whose
