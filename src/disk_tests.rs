@@ -72,6 +72,20 @@ async fn saved_chunks_stay_local_up_to_the_cache_budget() {
 }
 
 #[tokio::test]
+async fn a_detach_caches_only_the_newest_saved_chunks() {
+    let root = tempfile::tempdir().unwrap();
+    let disk = open_disk(root.path()).await;
+    disk.write(0, vec![1; (2 * CHUNK) as usize]).await.unwrap();
+    disk.checkpoint().await.unwrap();
+    disk.cache.set_limit(CHUNK);
+    disk.cache_local_chunks().await;
+    let newest = disk.saved_local.lock().unwrap().back().copied().unwrap();
+    let hash = disk.slot(newest).await.unwrap().lock().await.base.unwrap();
+    assert!(disk.cache.has(&hash));
+    assert_eq!(disk.cache.bytes(), CHUNK);
+}
+
+#[tokio::test]
 async fn host_pressure_frees_saved_chunks() {
     let root = tempfile::tempdir().unwrap();
     let disk = open_disk(root.path()).await;

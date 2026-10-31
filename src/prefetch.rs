@@ -86,8 +86,9 @@ pub async fn run(disk: Arc<Disk>, plan: PrefetchPlan, queue: UnboundedReceiver<R
         fetch_all(&disk, &slots, startup).await;
         log::info!("disk {}: prefetch of {count} startup chunks done in {} ms", disk.id, started.elapsed().as_millis());
     }
-    if plan.fill && !disk.is_closed() {
+    while plan.fill && !disk.is_closed() {
         background_fill(&disk, &fill_slots).await;
+        disk.fill_wanted.notified().await;
     }
     let _ = ahead.await;
 }

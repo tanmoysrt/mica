@@ -73,6 +73,8 @@ pub struct Disk {
     /// Bytes written since the last start of writeback.
     written_bytes: AtomicU64,
     writeback_wanted: Notify,
+    /// Starts the background fill again: the cache budget changed.
+    pub(crate) fill_wanted: Notify,
     /// Writes done, and how many of them a FLUSH made durable. A FLUSH
     /// that finds all writes before it durable has nothing to do.
     pub(crate) writes_done: AtomicU64,
@@ -237,6 +239,7 @@ impl Disk {
             unsynced_segments: Mutex::default(),
             written_bytes: AtomicU64::new(0),
             writeback_wanted: Notify::new(),
+            fill_wanted: Notify::new(),
             // Above zero: the first FLUSH syncs what a crashed daemon left.
             writes_done: AtomicU64::new(1),
             writes_synced: AtomicU64::new(0),
@@ -613,6 +616,7 @@ impl Disk {
     /// Stops the checkpoint loop and the prefetch of this disk.
     pub fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
+        self.fill_wanted.notify_one();
         self.checkpoint_wanted.notify_one();
         self.writeback_wanted.notify_one();
     }
@@ -833,15 +837,17 @@ impl Disk {
         saved * self.chunk_size > self.cache.limit_bytes() || (saved > 0 && self.host_pressure.load(Ordering::Acquire))
     }
 
-    /// Copies every saved local chunk into the cache, before a detach
-    /// deletes the data files. A reflink on btrfs and XFS. A chunk that
-    /// fails to copy is only read from S3 later.
+    /// Copies the newest saved local chunks into the cache, up to its budget,
+    /// before a detach deletes the data files. Older ones would only push
+    /// these out. A reflink on btrfs and XFS. A chunk that fails to copy is
+    /// only read from S3 later.
     pub(crate) async fn cache_local_chunks(&self) {
-        let local: Vec<usize> = self.local_set.lock().unwrap().iter().copied().collect();
-        for index in local {
+        let budget = (self.cache.limit_bytes() / self.chunk_size) as usize;
+        let saved: Vec<usize> = self.saved_local.lock().unwrap().iter().copied().collect();
+        for index in saved.iter().skip(saved.len().saturating_sub(budget)).copied() {
             let Ok(slot) = self.slot(index).await else { continue };
             let slot = slot.lock_owned().await;
-            let (Some(hash), false) = (slot.base, slot.unsaved) else { continue };
+            let (true, Some(hash), false) = (slot.local, slot.base, slot.unsaved) else { continue };
             let (data, cache) = (self.data.clone(), self.cache.clone());
             if let Err(error) = blocking(move || cache.store(&hash, |file| data.copy_out(index, file))).await {
                 log::warn!("disk {}: chunk {index} not cached: {error:#}", self.id);

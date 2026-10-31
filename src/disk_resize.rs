@@ -54,6 +54,7 @@ impl Disk {
         *self.limits.lock().unwrap() = limits;
         if let Some(bytes) = limits.cache_bytes {
             self.cache.set_limit(bytes);
+            self.fill_wanted.notify_one();
         }
         self.local_chunk_limit
             .store((limits.dirty_bytes.unwrap_or(default_dirty) / self.chunk_size).max(2) as usize, Ordering::Relaxed);
