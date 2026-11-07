@@ -1,18 +1,18 @@
 [package]
 name = "mica"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
+description = "Block devices whose data lives in an S3 bucket"
+license = "MIT"
 
 [dependencies]
 anyhow = "1.0.104"
 bytes = "1.12.1"
 clap = { version = "4.6.7", features = ["derive"] }
 crc32fast = "1.5.0"
-dialoguer = "0.12.0"
 env_logger = "0.11.11"
 futures = "0.3.34"
 hex = "0.4.3"
-humantime = "2.4.0"
 io-uring = "0.7"
 libc = "0.2.189"
 libublk = "0.4.8"
@@ -22,9 +22,12 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
 smol = "2.0.2"
-zstd = "0.13.3"
 tokio = { version = "1.53.1", features = ["full"] }
 toml = "1.1.6"
+zstd = "0.13.3"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+
+[profile.release]
+debug = 1
