@@ -90,13 +90,13 @@ impl NodeCache {
     }
 
     pub fn for_disk(self: &Arc<Self>, disk: &str, limit: u64) -> ChunkCache {
-        self.state.lock().unwrap().disks.entry(disk.to_string()).or_default().limit = limit;
+        self.state().disks.entry(disk.to_string()).or_default().limit = limit;
         ChunkCache { node: self.clone(), disk: disk.to_string() }
     }
 
     /// Deletes the cache of a deleted disk.
     pub fn remove_disk(&self, disk: &str) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state();
         if let Some(index) = state.disks.remove(disk) {
             for hash in index.files.keys() {
                 state.forget_owner(hash, disk);
@@ -104,6 +104,11 @@ impl NodeCache {
         }
         drop(state);
         let _ = std::fs::remove_dir_all(self.root.join(disk));
+    }
+
+    /// The index stays usable after a panic in another thread.
+    fn state(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn path(&self, disk: &str, hash: &Hash) -> PathBuf {
@@ -117,9 +122,12 @@ impl State {
         self.clock += 1;
         let used = self.clock;
         let index = self.disks.entry(disk.to_string()).or_default();
-        if index.files.insert(hash, Item { bytes, used, verified }).is_none() {
-            index.bytes += bytes;
+        // A file added again replaces its old entry in both indexes.
+        if let Some(old) = index.files.insert(hash, Item { bytes, used, verified }) {
+            index.by_age.remove(&(old.used, hash));
+            index.bytes -= old.bytes;
         }
+        index.bytes += bytes;
         index.by_age.insert((used, hash));
         self.owners.entry(hash).or_insert_with(|| disk.to_string());
     }
@@ -159,7 +167,7 @@ impl State {
             if bytes <= index.limit {
                 break;
             }
-            bytes -= index.files[hash].bytes;
+            bytes -= index.files.get(hash).map_or(0, |item| item.bytes);
             out.push(*hash);
         }
         out
@@ -170,7 +178,7 @@ impl ChunkCache {
     /// Opens a cached chunk. It checks the hash of a file found at start,
     /// and links a file of another disk on the node. Blocking.
     pub fn open(&self, hash: &Hash) -> Result<Option<File>> {
-        let verified = self.node.state.lock().unwrap().touch(&self.disk, hash);
+        let verified = self.node.state().touch(&self.disk, hash);
         match verified {
             Some(true) => return Ok(Some(File::open(self.path(hash))?)),
             Some(false) => {
@@ -178,7 +186,7 @@ impl ChunkCache {
                     self.add(hash, true);
                     return Ok(Some(file));
                 }
-                self.node.state.lock().unwrap().remove(&self.disk, hash);
+                self.node.state().remove(&self.disk, hash);
                 let _ = std::fs::remove_file(self.path(hash));
             }
             None => {}
@@ -189,12 +197,12 @@ impl ChunkCache {
     /// Opens a cached chunk only if its hash is checked already. It never
     /// blocks for long, so the queue threads use it.
     pub fn open_checked(&self, hash: &Hash) -> Option<File> {
-        let verified = self.node.state.lock().unwrap().touch(&self.disk, hash)?;
+        let verified = self.node.state().touch(&self.disk, hash)?;
         verified.then(|| File::open(self.path(hash)).ok()).flatten()
     }
 
     pub fn has(&self, hash: &Hash) -> bool {
-        let state = self.node.state.lock().unwrap();
+        let state = self.node.state();
         state.disks.get(&self.disk).is_some_and(|index| index.files.contains_key(hash))
     }
 
@@ -217,12 +225,12 @@ impl ChunkCache {
     }
 
     pub fn set_limit(&self, limit: u64) {
-        self.node.state.lock().unwrap().disks.entry(self.disk.clone()).or_default().limit = limit;
+        self.node.state().disks.entry(self.disk.clone()).or_default().limit = limit;
         self.evict();
     }
 
     pub fn usage(&self) -> Usage {
-        let state = self.node.state.lock().unwrap();
+        let state = self.node.state();
         let index = state.disks.get(&self.disk);
         Usage {
             chunks: index.map_or(0, |index| index.files.len()),
@@ -238,14 +246,14 @@ impl ChunkCache {
 
     fn add(&self, hash: &Hash, verified: bool) {
         let bytes = std::fs::metadata(self.path(hash)).map(|meta| meta.len()).unwrap_or(0);
-        self.node.state.lock().unwrap().add(&self.disk, *hash, bytes, verified);
+        self.node.state().add(&self.disk, *hash, bytes, verified);
         self.evict();
     }
 
     /// Deletes the oldest files over the budget. A reader with the file
     /// open keeps its data until it closes the file.
     fn evict(&self) {
-        let mut state = self.node.state.lock().unwrap();
+        let mut state = self.node.state();
         for hash in state.over_budget(&self.disk) {
             state.remove(&self.disk, &hash);
             let _ = std::fs::remove_file(self.path(&hash));
@@ -253,7 +261,7 @@ impl ChunkCache {
     }
 
     fn link_from_other_disk(&self, hash: &Hash) -> Result<Option<File>> {
-        let Some(owner) = self.node.state.lock().unwrap().owners.get(hash).cloned() else { return Ok(None) };
+        let Some(owner) = self.node.state().owners.get(hash).cloned() else { return Ok(None) };
         if owner == self.disk {
             return Ok(None);
         }
@@ -329,6 +337,19 @@ mod tests {
         cache.open(&first).unwrap();
         let third = put(&cache, b"abcde");
         assert!(cache.has(&first) && !cache.has(&second) && cache.has(&third));
+    }
+
+    #[test]
+    fn a_file_added_again_is_counted_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = NodeCache::load(dir.path().to_path_buf()).unwrap();
+        let cache = node.for_disk("a", 10);
+        let first = put(&cache, b"12345");
+        cache.add(&first, true);
+        assert_eq!(cache.usage().bytes, 5);
+        put(&cache, b"67890");
+        put(&cache, b"abcde");
+        assert_eq!(cache.usage().bytes, 10);
     }
 
     #[test]

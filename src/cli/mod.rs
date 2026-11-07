@@ -84,6 +84,9 @@ pub enum DiskCommand {
         fs: String,
         #[arg(long)]
         force: bool,
+        /// Do not download the rest of the disk in the background.
+        #[arg(long)]
+        no_fill: bool,
     },
     /// Trim, unmount and detach. Takes a disk name or a mount path.
     Unmount { target: String },
@@ -156,8 +159,9 @@ pub async fn run(cli: Cli, config: Config) -> Result<()> {
         },
         Command::Disk(DiskCommand::Attach { disk, force, no_fill }) => Request::Attach { store: store()?, disk, force, fill: !no_fill },
         Command::Disk(DiskCommand::Detach { disk }) => Request::Detach { disk },
-        Command::Disk(DiskCommand::Mount { disk, path, fs, force }) => {
-            return mount::mount(&config, store()?, &disk, &path, &fs, force).await;
+        Command::Disk(DiskCommand::Mount { disk, path, fs, force, no_fill }) => {
+            let attach = Request::Attach { store: store()?, disk, force, fill: !no_fill };
+            return mount::mount(&config, attach, &path, &fs).await;
         }
         Command::Disk(DiskCommand::Unmount { target }) => return mount::unmount(&config, &target).await,
         Command::Disk(DiskCommand::Commit { disk }) => Request::Commit { disk },

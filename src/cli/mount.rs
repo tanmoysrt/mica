@@ -6,15 +6,16 @@
 
 use crate::config::Config;
 use crate::daemon::api::{Request, call};
-use crate::store::StoreConfig;
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
 /// Attaches the disk, formats it if it was never written, and mounts it.
-pub async fn mount(config: &Config, store: StoreConfig, disk: &str, path: &Path, fs: &str, force: bool) -> Result<()> {
-    let attached = call(&config.socket, &Request::Attach { store, disk: disk.into(), force, fill: true }).await?;
+pub async fn mount(config: &Config, attach: Request, path: &Path, fs: &str) -> Result<()> {
+    let Request::Attach { disk, .. } = &attach else { bail!("mount needs an attach request") };
+    let disk = disk.clone();
+    let attached = call(&config.socket, &attach).await?;
     let device = attached["device"].as_str().context("the daemon gave no device")?.to_string();
     let result = (|| {
         wait_for(&device)?;
@@ -25,7 +26,7 @@ pub async fn mount(config: &Config, store: StoreConfig, disk: &str, path: &Path,
         run("mount", &["-o", "nosuid,nodev", &device, &path.to_string_lossy()])
     })();
     if let Err(error) = result {
-        let _ = call(&config.socket, &Request::Detach { disk: disk.into() }).await;
+        let _ = call(&config.socket, &Request::Detach { disk: disk.clone() }).await;
         return Err(error);
     }
     println!("Mounted disk {disk} at {}", path.display());

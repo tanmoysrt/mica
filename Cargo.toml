@@ -30,4 +30,7 @@ zstd = "0.13.3"
 tempfile = "3.27.0"
 
 [profile.release]
+# A panic stops the daemon. The devices stay paused, and the next start
+# takes them over: better than a live daemon with a dead queue thread.
+panic = "abort"
 debug = 1
