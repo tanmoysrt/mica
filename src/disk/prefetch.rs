@@ -145,9 +145,10 @@ impl Disk {
                 continue;
             }
             let Ok(chunks) = self.store.page(entry, page).await else { break };
-            let wanted = chunks.0.iter().enumerate().filter(|(_, chunk)| !chunk.is_zero() && !self.cache.has(&chunk.hash));
+            let wanted: Vec<usize> =
+                chunks.0.iter().enumerate().filter(|(_, chunk)| !chunk.is_zero() && !self.cache.has(&chunk.hash)).map(|(offset, _)| offset).collect();
             fetched += futures::stream::iter(wanted)
-                .map(|(offset, _)| async move {
+                .map(|offset| async move {
                     if self.is_closed() || self.cache.nearly_full() {
                         return 0;
                     }

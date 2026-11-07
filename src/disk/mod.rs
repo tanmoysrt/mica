@@ -24,7 +24,7 @@ mod transaction;
 #[cfg(test)]
 mod tests;
 
-pub use fast::{LocalRead, LocalWrite};
+pub use fast::{LocalRead, LocalWrite, ReadSource};
 pub use transaction::Kind as TransactionKind;
 
 use crate::local::{ChunkCache, DataFiles, DirtyLog, DiskFolder};

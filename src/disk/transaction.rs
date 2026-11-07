@@ -275,9 +275,10 @@ impl Disk {
         written: &mut BTreeSet<String>,
         replaced: &mut Vec<(usize, Entry)>,
     ) -> Result<crate::store::Root> {
-        let mut by_page: BTreeMap<usize, Vec<&Change>> = BTreeMap::new();
+        // Owned values: borrowed items in a stream make the future not Send.
+        let mut by_page: BTreeMap<usize, Vec<(usize, Entry)>> = BTreeMap::new();
         for change in changed {
-            by_page.entry(change.index / CHUNKS_PER_PAGE).or_default().push(change);
+            by_page.entry(change.index / CHUNKS_PER_PAGE).or_default().push((change.index, change.new));
         }
         let pages: Vec<(usize, Entry)> = futures::stream::iter(by_page)
             .map(|(page, changes)| async move {
@@ -286,8 +287,8 @@ impl Disk {
                 for slot in slots {
                     entries.push(slot.read().await.base);
                 }
-                for change in changes {
-                    entries[change.index % CHUNKS_PER_PAGE] = change.new;
+                for (index, new) in changes {
+                    entries[index % CHUNKS_PER_PAGE] = new;
                 }
                 Ok::<_, anyhow::Error>((page, self.store.put_page(next, page, &Page(entries)).await?))
             })

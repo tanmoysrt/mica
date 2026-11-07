@@ -79,13 +79,6 @@ impl Head {
         }
     }
 
-    /// True when a snapshot uses the versions from `birth` up to `before`
-    /// (not included). A snapshot that is being deleted still counts, until
-    /// its delete is done.
-    pub fn snapshot_in(&self, birth: u64, before: u64) -> bool {
-        self.snapshots.values().any(|snapshot| (birth..before).contains(&snapshot.transaction))
-    }
-
     pub fn owned_by(&self, id: &str) -> bool {
         self.owner.as_ref().is_some_and(|owner| owner.id == id)
     }

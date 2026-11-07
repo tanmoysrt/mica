@@ -84,7 +84,6 @@ pub enum Written {
 pub struct Bucket {
     store: Arc<dyn ObjectStore>,
     prefix: String,
-    pub config: StoreConfig,
     pub counts: Counts,
 }
 
@@ -113,18 +112,17 @@ impl Bucket {
             .with_allow_http(config.endpoint.starts_with("http://"))
             .build()
             .context("create S3 client")?;
-        Ok(Self::over(Arc::new(store), config.clone()))
+        Ok(Self::over(Arc::new(store), &config.prefix))
     }
 
     /// A bucket in memory, for tests.
+    #[cfg(test)]
     pub fn in_memory() -> Self {
-        let config = StoreConfig { endpoint: "memory".into(), bucket: "test".into(), ..Default::default() };
-        Self::over(Arc::new(object_store::memory::InMemory::new()), config)
+        Self::over(Arc::new(object_store::memory::InMemory::new()), "test")
     }
 
-    fn over(store: Arc<dyn ObjectStore>, config: StoreConfig) -> Self {
-        let prefix = config.prefix.trim_matches('/').to_string();
-        Self { store, prefix, config, counts: Counts::default() }
+    fn over(store: Arc<dyn ObjectStore>, prefix: &str) -> Self {
+        Self { store, prefix: prefix.trim_matches('/').to_string(), counts: Counts::default() }
     }
 
     pub async fn get(&self, key: &str) -> Result<Option<Bytes>> {

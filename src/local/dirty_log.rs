@@ -145,7 +145,9 @@ impl DirtyLog {
         durable.end += record.len() as u64;
         let mut state = self.state.lock().unwrap();
         state.logged.extend(chunks);
-        chunks.iter().for_each(|index| drop(state.logging.remove(index)));
+        chunks.iter().for_each(|index| {
+            state.logging.remove(index);
+        });
         Ok(())
     }
 

@@ -42,7 +42,7 @@ impl Rig {
     async fn attach(&self, name: &str) -> Arc<Disk> {
         let claim = Claim::take(self.store(name), &self.node, false).await.unwrap();
         let folder = DiskFolder::new(&self.root.join("data"), &self.root.join("run"), name);
-        folder.create(&self.bucket.config).unwrap();
+        folder.create(&crate::store::StoreConfig { endpoint: "memory".into(), bucket: "test".into(), ..Default::default() }).unwrap();
         let tuning = Tuning {
             transaction_interval: Duration::from_secs(3600),
             transaction_after: 1 << 30,
