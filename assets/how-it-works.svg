@@ -15,18 +15,6 @@
     .flow { stroke: #0057ff; stroke-width: 1.8; fill: none; }
     .head { fill: #59636e; }
     .headblue { fill: #0057ff; }
-    @media (prefers-color-scheme: dark) {
-      .panel { fill: #161b22; stroke: #30363d; }
-      .box { fill: #0d1117; stroke: #3d444d; }
-      .accent { fill: #2f6feb; }
-      .bucket { fill: #0d2147; stroke: #4493f8; }
-      .title, .text, .mono { fill: #e6edf3; }
-      .small { fill: #9198a1; }
-      .line { stroke: #9198a1; }
-      .flow { stroke: #4493f8; }
-      .head { fill: #9198a1; }
-      .headblue { fill: #4493f8; }
-    }
   </style>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" class="head"/></marker>

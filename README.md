@@ -1,4 +1,4 @@
-<h1 align="center"><img src="assets/mica-logo.png" alt="mica" width="168" height="168"></h1>
+<p align="center"><img src="assets/mica-logo.png" alt="mica" width="168" height="168"></p>
 
 <p align="center"><strong>A Linux disk that lives in an S3 bucket.</strong><br>It can be larger than your SSD, and it moves to any machine.</p>
 
@@ -9,7 +9,10 @@
 mica gives a Linux machine a normal disk, `/dev/mica/<name>`. Put a filesystem on it, give it to a VM, or keep a database on it. The whole disk lives in an S3 bucket, such as Cloudflare R2 or AWS S3. The machine keeps the newest writes and a cache on its local SSD, so most reads and writes do not wait for the bucket.
 
 <p align="center">
-  <img src="assets/how-it-works.svg" alt="A program uses /dev/mica/data. The mica daemon keeps the newest writes and a cache on the local SSD, and uploads the changes to the bucket every 5 minutes. Another machine can attach the disk and downloads only what it reads." width="760">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/how-it-works-dark.svg">
+    <img src="assets/how-it-works.svg" alt="A program uses /dev/mica/data. The mica daemon keeps the newest writes and a cache on the local SSD, and uploads the changes to the bucket every 5 minutes. Another machine can attach the disk and downloads only what it reads." width="760">
+  </picture>
 </p>
 
 ## What you can do with it
