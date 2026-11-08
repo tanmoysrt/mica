@@ -78,6 +78,14 @@ pub enum Command {
         #[command(subcommand)]
         command: SnapshotCommand,
     },
+    /// Add, list and forget the buckets that this machine keeps keys for
+    #[command(arg_required_else_help = true, after_help = BUCKET_FILE)]
+    Bucket {
+        #[command(flatten)]
+        store: StoreArgs,
+        #[command(subcommand)]
+        command: BucketCommand,
+    },
     /// Run mica as a systemd service
     #[command(subcommand, arg_required_else_help = true)]
     Service(service::ServiceCommand),
@@ -158,6 +166,20 @@ pub enum DiskCommand {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum BucketCommand {
+    /// Check a bucket and keep its keys. Then its disks need only their names
+    Add,
+    /// List the buckets that this machine knows
+    Ls,
+    /// Delete the keys of a bucket on this machine. Its disks stay in the bucket
+    #[command(arg_required_else_help = true)]
+    Forget {
+        /// The bucket: its name, its name and prefix (my-disks/laptop), or its full place
+        name: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum SnapshotCommand {
     /// Upload all changes of a disk, and keep this version under a name
     #[command(arg_required_else_help = true)]
@@ -187,7 +209,7 @@ pub struct StoreArgs {
     /// The URL of the S3 service
     #[arg(long, global = true, value_name = "URL", env = "OBJECT_STORAGE_ENDPOINT", hide_env_values = true)]
     endpoint: Option<String>,
-    /// The bucket
+    /// The bucket. Alone, it picks a bucket that mica knows
     #[arg(long, global = true, value_name = "NAME", env = "OBJECT_STORAGE_BUCKET", hide_env_values = true)]
     bucket: Option<String>,
     /// A folder in the bucket for the disks
@@ -205,12 +227,18 @@ pub struct StoreArgs {
 }
 
 impl StoreArgs {
-    /// Each value from the flag or the variable, else from the file. `None`
-    /// when nothing is given: the daemon then uses a bucket that it knows.
-    pub fn resolve(&self) -> Result<Option<StoreConfig>> {
-        let given = [&self.endpoint, &self.bucket, &self.prefix, &self.region, &self.access_key_id, &self.secret_access_key];
-        if self.store.is_none() && given.iter().all(|value| value.is_none()) {
-            return Ok(None);
+    /// The bucket: its keys, or the name of a bucket that the daemon knows.
+    /// Each value comes from the flag or the variable, else from the file.
+    /// A bucket name alone, maybe with a prefix, names a known bucket.
+    /// Nothing: the daemon looks in all the buckets that it knows.
+    pub fn resolve(&self) -> Result<(Option<StoreConfig>, Option<String>)> {
+        let keys = [&self.endpoint, &self.region, &self.access_key_id, &self.secret_access_key];
+        if self.store.is_none() && keys.iter().all(|value| value.is_none()) {
+            let name = self.bucket.as_ref().map(|bucket| match &self.prefix {
+                Some(prefix) => format!("{bucket}/{prefix}"),
+                None => bucket.clone(),
+            });
+            return Ok((None, name));
         }
         let mut config = self.store.as_deref().map(StoreConfig::read).transpose()?.unwrap_or_default();
         let values = [
@@ -226,7 +254,7 @@ impl StoreArgs {
                 value.clone_from(given);
             }
         }
-        config.checked().map(Some)
+        Ok((Some(config.checked()?), None))
     }
 }
 
@@ -259,10 +287,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_bucket_name_alone_names_a_known_bucket() {
+        let cli = Cli::try_parse_from(["mica", "disk", "ls", "--bucket", "photos", "--prefix", "laptop"]).unwrap();
+        let Command::Disk { store, .. } = cli.command else { panic!("not a disk command") };
+        if std::env::var_os("OBJECT_STORAGE_ENDPOINT").is_none() {
+            assert!(matches!(store.resolve().unwrap(), (None, Some(name)) if name == "photos/laptop"));
+        }
+    }
+
+    #[test]
     fn no_bucket_values_give_no_bucket() {
         let cli = Cli::try_parse_from(["mica", "disk", "info", "data"]).unwrap();
         let Command::Disk { store, .. } = cli.command else { panic!("not a disk command") };
-        assert!(std::env::var_os("OBJECT_STORAGE_BUCKET").is_some() || store.resolve().unwrap().is_none());
+        let none = matches!(store.resolve().unwrap(), (None, None));
+        assert!(std::env::var_os("OBJECT_STORAGE_BUCKET").is_some() || none);
     }
 
     #[test]
@@ -272,7 +310,7 @@ mod tests {
         std::fs::write(&file, "endpoint = \"http://file\"\nbucket = \"from-file\"\n").unwrap();
         let cli = Cli::try_parse_from(["mica", "disk", "ls", "--store", file.to_str().unwrap(), "--bucket", "from-flag"]).unwrap();
         let Command::Disk { store, .. } = cli.command else { panic!("not a disk command") };
-        let store = store.resolve().unwrap().unwrap();
+        let store = store.resolve().unwrap().0.unwrap();
         assert_eq!((store.endpoint.as_str(), store.bucket.as_str(), store.region.as_str()), ("http://file", "from-flag", "auto"));
     }
 }

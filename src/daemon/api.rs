@@ -2,8 +2,10 @@
 //!
 //! ```text
 //! $ echo '{"command":"status"}' | socat - UNIX-CONNECT:/run/mica.sock
-//! {"ok":true,"result":{"node":"node-23","disks":[]}}
+//! {"ok":true,"result":{"node":"node-23","version":"0.2.0","disks":[],"tasks":[]}}
 //! ```
+//!
+//! `docs/api.md` lists each request and its answer.
 //!
 //! The socket belongs to root, with mode 0600, because a request can make
 //! devices and carry bucket credentials.
@@ -20,19 +22,24 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
-/// A command, and the bucket of its disk. Without a bucket, the daemon
-/// finds the disk in the buckets that it knows. A bucket that works is kept.
-#[derive(Debug, Serialize, Deserialize)]
+/// A command, and the bucket of its disk: with its keys in `store`, or
+/// the name of a bucket that the daemon knows in `bucket`. Without either,
+/// the daemon finds the disk in the buckets that it knows. A bucket that
+/// works is kept.
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Request {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store: Option<StoreConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket: Option<String>,
     #[serde(flatten)]
     pub command: Command,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "kebab-case")]
 pub enum Command {
+    #[default]
     Status,
     List,
     Info { disk: String },
@@ -45,6 +52,9 @@ pub enum Command {
     SnapshotCreate { disk: String, snapshot: String },
     SnapshotDelete { disk: String, snapshot: String },
     Restore { disk: String, snapshot: String, target: String },
+    BucketAdd,
+    BucketList,
+    BucketForget { name: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -88,7 +98,8 @@ async fn answer(daemon: Arc<Daemon>, stream: UnixStream) {
 }
 
 async fn run(daemon: &Arc<Daemon>, request: Request) -> Result<Value> {
-    let store = request.store.as_ref();
+    let named = request.bucket.as_deref().map(|name| daemon.buckets.find(name)).transpose()?;
+    let store = request.store.as_ref().or(named.as_ref());
     let result = match request.command {
         Command::Status => Ok(daemon.status().await),
         Command::List => daemon.list(store).await,
@@ -102,9 +113,12 @@ async fn run(daemon: &Arc<Daemon>, request: Request) -> Result<Value> {
         Command::SnapshotCreate { disk, snapshot } => daemon.create_snapshot(store, &disk, &snapshot).await,
         Command::SnapshotDelete { disk, snapshot } => daemon.delete_snapshot(store, &disk, &snapshot).await,
         Command::Restore { disk, snapshot, target } => daemon.restore(store, &disk, &snapshot, &target).await,
+        Command::BucketAdd => daemon.add_bucket(store).await,
+        Command::BucketList => Ok(daemon.list_buckets().await),
+        Command::BucketForget { name } => return daemon.forget_bucket(&name).await,
     };
     if let (Ok(_), Some(store)) = (&result, store)
-        && let Err(error) = daemon.buckets.remember(store)
+        && let Err(error) = daemon.remember(store).await
     {
         log::warn!("cannot keep the bucket {}: {error:#}", store.place());
     }

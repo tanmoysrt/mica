@@ -21,10 +21,11 @@ use anyhow::{Result, bail, ensure};
 use futures::{StreamExt, TryStreamExt};
 use serde_json::{Value, json};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 const PARALLEL: usize = 64;
 
-const NO_CONDITIONS: &str = "this bucket ignores conditional writes, so mica cannot stop two machines from using the disk at once. Attach it on one machine only";
+pub(super) const NO_CONDITIONS: &str = "this bucket ignores conditional writes, so mica cannot stop two machines from using the disk at once. Attach it on one machine only";
 
 impl Daemon {
     pub async fn create(&self, store: Option<&StoreConfig>, name: &str, size: u64, chunk_size: Option<u64>, limits: LimitsRequest) -> Result<Value> {
@@ -48,7 +49,7 @@ impl Daemon {
             Some(store) => vec![store.clone()],
             None => self.buckets.all(),
         };
-        ensure!(!stores.is_empty(), "this machine knows no bucket yet: {}", self.no_bucket_hint());
+        ensure!(!stores.is_empty(), "this machine knows no bucket yet: {}", super::buckets::no_bucket_hint());
         let mut disks = Vec::new();
         for store in &stores {
             for mut disk in self.list_bucket(store).await? {
@@ -79,7 +80,7 @@ impl Daemon {
     pub async fn info(&self, store: Option<&StoreConfig>, name: &str) -> Result<Value> {
         let disk = self.locate(store, name).await?;
         let mut info = describe(name, &disk.require_head().await?.head);
-        info["bucket"] = disk.bucket.config.place().into();
+        info["bucket"] = disk.bucket.place.clone().into();
         info["local"] = self.local_state(&info).await;
         Ok(info)
     }
@@ -167,6 +168,8 @@ impl Daemon {
         let root = source.store.root(&head, chosen.transaction).await?;
         let new = DiskStore::new(source.store.bucket.clone(), target);
         let mut claim = Claim::create(new.clone(), &self.node, Head::new(root.disk_size, root.chunk_size, head.limits, None)).await?;
+        // The total is known after the pages of the snapshot are read.
+        let running = self.tasks.start(target, "copy");
         let mut keys = Vec::new();
         if chosen.transaction != 0 {
             keys.push(source.store.root_key(chosen.transaction));
@@ -178,19 +181,25 @@ impl Daemon {
                 }
             }
         }
+        running.task.total.store(keys.len() as u64, Ordering::Relaxed);
         let (from, to) = (source.store.prefix(), new.prefix());
         let copies: Vec<(String, String)> = keys.iter().map(|key| (key.clone(), key.replacen(&from, &to, 1))).collect();
         futures::stream::iter(copies)
             .map(|(key, target)| {
-                let bucket = new.bucket.clone();
-                async move { bucket.copy(&key, &target).await }
+                let (bucket, task) = (new.bucket.clone(), running.task.clone());
+                async move {
+                    bucket.copy(&key, &target).await?;
+                    task.done.fetch_add(1, Ordering::Relaxed);
+                    Ok::<_, anyhow::Error>(())
+                }
             })
             .buffer_unordered(PARALLEL)
             .try_collect::<Vec<()>>()
             .await?;
         claim
             .update(|head| {
-                (head.transaction, head.next, head.time) = (chosen.transaction, chosen.transaction + 1, unix_now());
+                // The time of the data, as at its last save.
+                (head.transaction, head.next, head.time) = (chosen.transaction, chosen.transaction + 1, root.time);
                 head.profile = source.head().profile.clone();
             })
             .await?;

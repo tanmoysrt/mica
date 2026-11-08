@@ -56,6 +56,7 @@ cat /mnt/data-1/hello.txt
 |---|---|
 | [How mica works](docs/design.md) | The layout in the bucket, writes, reads, transactions, snapshots, crashes |
 | [Running mica](docs/operations.md) | Install, commands, laptops, chunk sizes, problems |
+| [The daemon API](docs/api.md) | The requests and answers on the socket, for programs |
 
 ## Project status
 

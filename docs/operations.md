@@ -33,12 +33,25 @@ default.
 
 ## The bucket of a disk
 
-The first command on a bucket needs its place and its keys, such as the
-first `mica disk create`, or the first `mica disk attach` of a disk that
-another machine made. mica keeps a bucket that works, root only, in
-`/var/lib/mica/buckets/`. Later commands need only the name of the disk:
-mica finds the disk in the buckets that it knows. A new disk goes to the
-one bucket that mica knows. With more than one, give the bucket again.
+The first command on a bucket needs its place and its keys, such as
+`mica bucket add`, the first `mica disk create`, or the first
+`mica disk attach` of a disk that another machine made. mica keeps a
+bucket that works, root only, in `/var/lib/mica/buckets/`. This is the only
+copy of the keys on the machine. Later commands need only the name of the
+disk: mica finds the disk in the buckets that it knows. A new disk goes to
+the one bucket that mica knows. With more than one, pick one with
+`--bucket <name>`, with no keys.
+
+```bash
+sudo mica bucket add --store s3.toml     # checks the bucket and keeps its keys
+sudo mica bucket ls                      # the buckets of this machine
+sudo mica disk create db --size 50G --bucket photos   # pick a known bucket
+sudo mica bucket forget photos           # delete its keys on this machine
+```
+
+To rotate the keys of a bucket, give the new keys once, such as with
+`mica bucket add`. The attached disks of that bucket use them at once.
+`mica service uninstall` deletes the keys of all buckets.
 
 mica takes each value from the first of these that gives it:
 
@@ -58,8 +71,7 @@ sudo mica disk create data --size 500G --store s3.toml
 Do not give the secret key as a flag on a shared machine: other users see
 the flags of a process in `ps`.
 
-Two disks can use two buckets with two sets of credentials. The newest
-credentials for a bucket replace the old ones.
+Two disks can use two buckets with two sets of keys.
 
 ## Use a disk
 
@@ -109,10 +121,12 @@ mica disk.
 | `mica disk release <disk>` | Frees a disk whose machine is gone for good. The unsaved data of that machine is lost. |
 | `mica disk delete <disk>` | Deletes the disk and its snapshots. Refused while a machine has it. |
 | `mica snapshot create / delete <disk> <name>` | Snapshots. A create uploads all changes first. |
+| `mica bucket add / ls / forget` | The buckets that the machine keeps keys for |
 | `mica service install / uninstall / status` | The systemd unit `mica.service` |
 
 Each command prints the next step as a command to copy. `--json` prints
-the answer of the daemon as JSON instead. `mica status --json` also shows
+the answer of the daemon as JSON instead: [api.md](api.md) lists each
+answer. `mica status --json` also shows
 the requests and bytes of each disk since its attach.
 
 ### Choose the chunk size
@@ -141,7 +155,11 @@ mkdir -p ~/photos && sudo mount ~/photos && sudo chown "$USER:" ~/photos
 ```
 
 After that, use `~/photos` with no sudo. At each boot, mica attaches the
-disk again before systemd mounts it.
+disk again before systemd mounts it. `mica service install` writes a udev
+rule, `/etc/udev/rules.d/90-mica.rules`, so that udev names each device
+`/dev/mica/<disk>` and systemd knows it: the fstab line waits for that
+device. This was tested with two reboots of a server, with unsaved data on
+the disk at each reboot.
 
 At shutdown, systemd unmounts the disk, and mica runs a last transaction.
 The local data stays on the laptop. So a shutdown never waits for a full
@@ -174,5 +192,8 @@ mount with `nofail` does not stop the boot: mount it when the disk is back.
 | `upload behind` in `mica status` | Unsaved data missed three transactions | Check the network and the bucket. Writes wait at the unsaved limit. |
 | `stopped: a local sync failed` | The local SSD failed a write | The disk refuses I/O. Check the SSD. |
 | `not served yet, tried again` in the log | At start, the bucket could not be reached | mica tries again every 10 seconds. Check the network. |
+| `no keys for the bucket … any more` in the log | The keys of the bucket of an attached disk were forgotten | Give them again with `mica bucket add`. mica tries again every 10 seconds. |
+| An fstab mount of a mica disk does not happen at boot | systemd does not know `/dev/mica/<disk>` | Run `sudo mica service install` again: it writes the udev rule. |
+| `UBSAN: array-index-out-of-bounds in io_uring/rsrc.c` in the kernel log | A warning of Linux 7.0 when the first ublk device starts | It shows once per boot. The data checks pass with it. |
 
 `journalctl -u mica -f` shows the log of the daemon.

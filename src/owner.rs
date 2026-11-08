@@ -32,10 +32,12 @@ impl NodeId {
             Err(_) => {
                 let id = crate::store::head::random_id();
                 std::fs::create_dir_all(data_dir)?;
-                std::fs::write(&path, &id).with_context(|| format!("write {}", path.display()))?;
+                // Durable: a node that forgets its id after a power loss takes its own disks for lost.
+                crate::local::write_durable(&path, id.as_bytes(), 0o644).with_context(|| format!("write {}", path.display()))?;
                 id
             }
         };
+        anyhow::ensure!(!id.is_empty(), "{} is empty: restore it, or delete it to start as a new node", path.display());
         let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default().trim().to_string();
         Ok(Self { hostname, id })
     }

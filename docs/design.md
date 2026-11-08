@@ -304,14 +304,16 @@ intervals.
 
 ## Credentials
 
-A request can carry the credentials of a bucket. The CLI takes each value
-from a flag, else from an `OBJECT_STORAGE_*` variable, else from the file
-of `--store`. The daemon keeps each bucket that a request gave and that
-worked, in `/var/lib/mica/buckets/`, mode 0600. A request without a bucket
-names only a disk, and the daemon finds the disk in the buckets that it
-knows. The daemon also keeps the credentials of an attached disk in
-`/var/lib/mica/disks/<disk>/store.toml`, so it serves the disk again after
-a restart or a reboot. A detach deletes that copy with the folder.
+A request can carry the keys of a bucket. The CLI takes each value from a
+flag, else from an `OBJECT_STORAGE_*` variable, else from the file of
+`--store`. The daemon keeps each bucket that a request gave and that
+worked, in `/var/lib/mica/buckets/`, mode 0600: the only copy of the keys
+on the node. A request without keys names a known bucket, or only a disk:
+then the daemon finds the disk in the buckets that it knows. The folder of
+an attached disk names the place of its bucket, so the daemon serves the
+disk again after a restart or a reboot with the keys of that place. New
+keys for a place replace the old ones, and the attached disks use them at
+once. [api.md](api.md) describes the requests.
 
 ## The code
 

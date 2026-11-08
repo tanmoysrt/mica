@@ -14,3 +14,21 @@ pub use cache::{ChunkCache, NodeCache};
 pub use data_files::DataFiles;
 pub use dirty_log::DirtyLog;
 pub use folder::{DiskFolder, LocalState};
+
+use anyhow::{Context, Result};
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
+
+/// Writes a small file so that a crash or a power loss leaves the old or
+/// the new content, never a part: a new file, synced, renamed into place,
+/// then the folder synced. `mode` is for a new file, such as 0o600.
+pub fn write_durable(path: &Path, content: &[u8], mode: u32) -> Result<()> {
+    let folder = path.parent().context("a file needs a folder")?;
+    let temp = path.with_extension("new");
+    let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(mode).open(&temp)?;
+    std::io::Write::write_all(&mut file, content)?;
+    file.sync_all()?;
+    std::fs::rename(&temp, path).with_context(|| format!("write {}", path.display()))?;
+    std::fs::File::open(folder)?.sync_all()?;
+    Ok(())
+}

@@ -2,17 +2,16 @@
 //!
 //! ```text
 //! <data folder>/disks/<disk>/state         attached or orphaned, and the ublk device number
-//! <data folder>/disks/<disk>/store.toml    the bucket credentials of the disk, root only
+//! <data folder>/disks/<disk>/bucket        the place of the bucket of the disk
 //! <data folder>/disks/<disk>/data          the data file
 //! <data folder>/disks/<disk>/log-a, log-b  the dirty log
 //! /run/mica/disks/<disk>/recent            the recent bitmap
 //! ```
 //!
-//! The credentials stay while the node holds the disk, so after a restart
-//! or a reboot the daemon serves the disk again by itself. A detach
-//! deletes the folder and the credentials with it.
+//! The place stays while the node holds the disk, so after a restart or a
+//! reboot the daemon serves the disk again with the keys of that bucket
+//! (see `buckets.rs`). A detach deletes the folder.
 
-use crate::store::StoreConfig;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -107,13 +106,13 @@ impl DiskFolder {
         self.write_state(old.state, ublk, &old.disk_id)
     }
 
-    /// Keeps the credentials for a restart of mica or of the node.
-    pub fn save_store(&self, store: &StoreConfig) -> Result<()> {
-        store.save(&self.path.join("store.toml"))
+    /// Keeps the place of the bucket for a restart of mica or of the node.
+    pub fn save_bucket(&self, place: &str) -> Result<()> {
+        super::write_durable(&self.path.join("bucket"), place.as_bytes(), 0o644)
     }
 
-    pub fn saved_store(&self) -> Option<StoreConfig> {
-        StoreConfig::read(&self.path.join("store.toml")).ok()
+    pub fn bucket(&self) -> Option<String> {
+        std::fs::read_to_string(self.path.join("bucket")).ok()
     }
 
     /// Deletes all local data of the disk. The cache stays.
@@ -133,14 +132,8 @@ impl DiskFolder {
         Ok(file)
     }
 
-    /// A new file, synced, then renamed into place: a crash leaves the old or the new state.
     fn write_state(&self, state: LocalState, ublk: Option<i32>, disk_id: &str) -> Result<()> {
-        let temp = self.path.join("state.new");
-        let file = File::create(&temp)?;
-        serde_json::to_writer(&file, &StateFile { layout: LAYOUT, state, ublk, disk_id: disk_id.to_string() })?;
-        file.sync_all()?;
-        std::fs::rename(&temp, self.path.join("state"))?;
-        File::open(&self.path)?.sync_all()?;
-        Ok(())
+        let file = StateFile { layout: LAYOUT, state, ublk, disk_id: disk_id.to_string() };
+        super::write_durable(&self.path.join("state"), &serde_json::to_vec(&file)?, 0o644)
     }
 }

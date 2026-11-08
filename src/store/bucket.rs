@@ -10,7 +10,7 @@ use object_store::aws::AmazonS3Builder;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload, UpdateVersion};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Where a disk lives. The CLI takes each value from a flag, a variable
@@ -30,15 +30,6 @@ impl StoreConfig {
     pub fn read(path: &std::path::Path) -> Result<Self> {
         let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
         toml::from_str(&text).with_context(|| format!("parse {}", path.display()))
-    }
-
-    /// Writes the config to a file that only root reads.
-    pub fn save(&self, path: &std::path::Path) -> Result<()> {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true).mode(0o600);
-        std::io::Write::write_all(&mut options.open(path)?, toml::to_string(self)?.as_bytes())?;
-        Ok(())
     }
 
     /// Refuses a config without a bucket. A missing region is `auto`.
@@ -76,9 +67,11 @@ pub enum Written {
 
 /// A bucket and a key prefix. Counts requests and bytes for `mica status`.
 pub struct Bucket {
-    store: Arc<dyn ObjectStore>,
+    /// Replaced when the bucket gets new keys.
+    client: RwLock<Arc<dyn ObjectStore>>,
     prefix: String,
-    pub config: StoreConfig,
+    /// See `StoreConfig::place`.
+    pub place: String,
     pub counts: Counts,
     /// A test store that writes over conditions, as Garage does.
     #[cfg(test)]
@@ -101,22 +94,21 @@ const DELETE_BATCH: usize = 1000;
 
 impl Bucket {
     pub fn connect(config: &StoreConfig) -> Result<Self> {
-        let store = AmazonS3Builder::new()
-            .with_endpoint(&config.endpoint)
-            .with_bucket_name(&config.bucket)
-            .with_region(&config.region)
-            .with_access_key_id(&config.access_key_id)
-            .with_secret_access_key(&config.secret_access_key)
-            .with_allow_http(config.endpoint.starts_with("http://"))
-            .build()
-            .context("create S3 client")?;
-        Ok(Self::over(Arc::new(store), config.clone()))
+        Ok(Self::over(client(config)?, config))
+    }
+
+    /// Uses new keys for the same place, such as after a key rotation. The
+    /// requests that run now finish with the old keys.
+    pub fn rekey(&self, config: &StoreConfig) -> Result<()> {
+        ensure!(config.place() == self.place, "the new keys are for another bucket");
+        *self.client.write().unwrap() = client(config)?;
+        Ok(())
     }
 
     /// A bucket in memory, for tests.
     #[cfg(test)]
     pub fn in_memory() -> Self {
-        Self::over(Arc::new(object_store::memory::InMemory::new()), StoreConfig { prefix: "test".into(), ..StoreConfig::default() })
+        Self::over(Arc::new(object_store::memory::InMemory::new()), &StoreConfig { prefix: "test".into(), ..StoreConfig::default() })
     }
 
     #[cfg(test)]
@@ -124,11 +116,11 @@ impl Bucket {
         Self { ignores_conditions: true, ..Self::in_memory() }
     }
 
-    fn over(store: Arc<dyn ObjectStore>, config: StoreConfig) -> Self {
+    fn over(client: Arc<dyn ObjectStore>, config: &StoreConfig) -> Self {
         Self {
-            store,
+            client: RwLock::new(client),
             prefix: config.prefix.trim_matches('/').to_string(),
-            config,
+            place: config.place(),
             counts: Counts::default(),
             #[cfg(test)]
             ignores_conditions: false,
@@ -142,7 +134,7 @@ impl Bucket {
     /// The object and its version tag (ETag), or `None` when it is missing.
     pub async fn get_tagged(&self, key: &str) -> Result<Option<(Bytes, String)>> {
         add(&self.counts.get, 1);
-        let result = match self.store.get(&self.path(key)).await {
+        let result = match self.client().get(&self.path(key)).await {
             Ok(result) => result,
             Err(object_store::Error::NotFound { .. }) => return Ok(None),
             Err(error) => return Err(error).with_context(|| format!("get {key}")),
@@ -194,7 +186,7 @@ impl Bucket {
         #[cfg(test)]
         let mode = if self.ignores_conditions { PutMode::Overwrite } else { mode };
         let options = PutOptions { mode, ..PutOptions::default() };
-        match self.store.put_opts(&self.path(key), PutPayload::from(data), options).await {
+        match self.client().put_opts(&self.path(key), PutPayload::from(data), options).await {
             Ok(result) => Ok(Written::Done(result.e_tag.unwrap_or_default())),
             Err(object_store::Error::AlreadyExists { .. } | object_store::Error::Precondition { .. }) => {
                 Ok(Written::Conflict)
@@ -206,7 +198,7 @@ impl Bucket {
     /// Copies inside the store: the data does not pass through this node.
     pub async fn copy(&self, from: &str, to: &str) -> Result<()> {
         add(&self.counts.copy, 1);
-        self.store.copy(&self.path(from), &self.path(to)).await.with_context(|| format!("copy {from} to {to}"))
+        self.client().copy(&self.path(from), &self.path(to)).await.with_context(|| format!("copy {from} to {to}"))
     }
 
     /// Deletes keys, 1,000 for each request. Missing keys are no error.
@@ -216,7 +208,7 @@ impl Bucket {
         }
         add(&self.counts.delete, keys.len().div_ceil(DELETE_BATCH) as u64);
         let paths: Vec<_> = keys.iter().map(|key| Ok(self.path(key))).collect();
-        let results: Vec<_> = self.store.delete_stream(futures::stream::iter(paths).boxed()).collect().await;
+        let results: Vec<_> = self.client().delete_stream(futures::stream::iter(paths).boxed()).collect().await;
         for result in results {
             match result {
                 Ok(_) | Err(object_store::Error::NotFound { .. }) => {}
@@ -229,7 +221,7 @@ impl Bucket {
     /// Every key below `prefix`, at any depth, without the bucket prefix.
     pub async fn list(&self, prefix: &str) -> Result<Vec<String>> {
         let objects: Vec<_> =
-            self.store.list(Some(&self.path(prefix))).try_collect().await.with_context(|| format!("list {prefix}"))?;
+            self.client().list(Some(&self.path(prefix))).try_collect().await.with_context(|| format!("list {prefix}"))?;
         add(&self.counts.list, (objects.len() as u64).div_ceil(1000).max(1));
         Ok(objects.into_iter().map(|object| self.key_of(&object.location)).collect())
     }
@@ -237,15 +229,19 @@ impl Bucket {
     /// The names of the folders directly below `prefix`.
     pub async fn list_folders(&self, prefix: &str) -> Result<Vec<String>> {
         add(&self.counts.list, 1);
-        let listing = self.store.list_with_delimiter(Some(&self.path(prefix))).await.with_context(|| format!("list {prefix}"))?;
+        let listing = self.client().list_with_delimiter(Some(&self.path(prefix))).await.with_context(|| format!("list {prefix}"))?;
         Ok(listing.common_prefixes.iter().filter_map(|folder| folder.filename().map(String::from)).collect())
     }
 
     /// True when any object is below `prefix`.
     pub async fn has_any(&self, prefix: &str) -> Result<bool> {
         add(&self.counts.list, 1);
-        let first = self.store.list(Some(&self.path(prefix))).next().await;
+        let first = self.client().list(Some(&self.path(prefix))).next().await;
         Ok(first.transpose().with_context(|| format!("list {prefix}"))?.is_some())
+    }
+
+    fn client(&self) -> Arc<dyn ObjectStore> {
+        self.client.read().unwrap().clone()
     }
 
     fn path(&self, key: &str) -> Path {
@@ -262,6 +258,19 @@ impl Bucket {
             false => full.strip_prefix(&format!("{}/", self.prefix)).unwrap_or(full).to_string(),
         }
     }
+}
+
+fn client(config: &StoreConfig) -> Result<Arc<dyn ObjectStore>> {
+    let store = AmazonS3Builder::new()
+        .with_endpoint(&config.endpoint)
+        .with_bucket_name(&config.bucket)
+        .with_region(&config.region)
+        .with_access_key_id(&config.access_key_id)
+        .with_secret_access_key(&config.secret_access_key)
+        .with_allow_http(config.endpoint.starts_with("http://"))
+        .build()
+        .context("create S3 client")?;
+    Ok(Arc::new(store))
 }
 
 fn add(counter: &AtomicU64, amount: u64) {

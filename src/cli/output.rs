@@ -16,9 +16,7 @@ pub fn print(command: &Command, result: &Value) {
         Command::Info { .. } => info(result),
         Command::Create { disk, .. } => {
             done(&format!("Made disk {disk}: {} in chunks of {}", size(&result["size"]), size(&result["chunk_size"])));
-            if let Some(warning) = result["warning"].as_str() {
-                eprintln!("{} {warning}", style("warning:").yellow().bold());
-            }
+            warn(&result["warning"]);
             next("Attach it", &format!("sudo mica disk attach {disk}"));
         }
         Command::Attach { disk } => {
@@ -50,11 +48,40 @@ pub fn print(command: &Command, result: &Value) {
         Command::Delete { disk } => done(&format!("Deleted disk {disk} and its snapshots")),
         Command::SnapshotCreate { disk, snapshot } => done(&format!("Took snapshot {snapshot} of disk {disk}")),
         Command::SnapshotDelete { disk, snapshot } => done(&format!("Deleted snapshot {snapshot} of disk {disk}")),
+        Command::BucketAdd => {
+            let disks = result["disks"].as_u64().unwrap_or(0);
+            done(&format!("Added bucket {}. It holds {disks} {}", text(&result["bucket"]), if disks == 1 { "disk" } else { "disks" }));
+            warn(&result["warning"]);
+            next("Make a disk in it", "sudo mica disk create <disk> --size 50G");
+        }
+        Command::BucketList => buckets(result),
+        Command::BucketForget { .. } => {
+            done(&format!("Forgot bucket {}. Its disks stay in the bucket", text(&result["forgotten"])));
+        }
         Command::Restore { disk, snapshot, target } => {
             done(&format!("Made disk {target} from snapshot {snapshot} of disk {disk}"));
             next("Attach it", &format!("sudo mica disk attach {target}"));
         }
     }
+}
+
+fn buckets(result: &Value) {
+    let buckets = result["buckets"].as_array().cloned().unwrap_or_default();
+    if buckets.is_empty() {
+        println!("This machine knows no bucket yet.");
+        next("Add one", "sudo mica bucket add --store s3.toml");
+        return;
+    }
+    let rows = buckets
+        .iter()
+        .map(|bucket| {
+            let key = text(&bucket["access_key_id"]);
+            let key = format!("{}…", key.chars().take(8).collect::<String>());
+            let prefix = bucket["prefix"].as_str().filter(|prefix| !prefix.is_empty()).unwrap_or("-");
+            vec![style(text(&bucket["name"])).bold().to_string(), prefix.to_string(), text(&bucket["endpoint"]), key, bucket["attached_here"].to_string()]
+        })
+        .collect();
+    table(&["BUCKET", "PREFIX", "ENDPOINT", "KEY", "ATTACHED HERE"], rows);
 }
 
 fn status(result: &Value) {
@@ -196,6 +223,12 @@ fn state(disk: &Value) -> String {
         return style("upload behind").yellow().to_string();
     }
     style("ok").green().to_string()
+}
+
+fn warn(warning: &Value) {
+    if let Some(warning) = warning.as_str() {
+        eprintln!("{} {warning}", style("warning:").yellow().bold());
+    }
 }
 
 fn done(message: &str) {

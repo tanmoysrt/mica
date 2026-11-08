@@ -4,7 +4,8 @@
 //! to the daemon. A command on a disk can give the bucket of the disk: each
 //! value comes from a flag, else from its `OBJECT_STORAGE_*` variable, else
 //! from the TOML file of `--store`. The daemon keeps a bucket that works,
-//! so later commands need only the name of the disk.
+//! so later commands need only the name of the disk, or `--bucket <name>`
+//! when the machine knows more than one bucket.
 
 mod args;
 mod output;
@@ -12,25 +13,28 @@ mod progress;
 pub mod service;
 
 pub use args::{Cli, Command};
-use args::{DiskCommand, SnapshotCommand};
+use args::{BucketCommand, DiskCommand, SnapshotCommand};
 use crate::config::{Config, parse_size};
 use crate::daemon::api::{Command as Call, Request, call};
 use anyhow::Result;
 
 pub async fn run(cli: Cli, config: Config) -> Result<()> {
-    let (store, command) = match cli.command {
+    let ((store, bucket), command) = match cli.command {
         Command::Daemon => unreachable!("main runs the daemon"),
-        Command::Service(command) => return service::run(command, &cli.config),
+        Command::Service(command) => return service::run(command, &cli.config, &config),
         Command::Status { watch: true } => return watch(&config).await,
-        Command::Status { watch: false } => (None, Call::Status),
+        Command::Status { watch: false } => ((None, None), Call::Status),
         Command::Disk { store, command } => (store.resolve()?, disk_command(command)?),
         Command::Snapshot { store, command } => (store.resolve()?, snapshot_command(command)),
+        Command::Bucket { store, command } => (store.resolve()?, bucket_command(command)),
     };
-    let request = Request { store, command };
+    let request = Request { store, bucket, command };
     let socket = &config.socket;
+    let message = waiting(&request.command);
     let result = match &request.command {
-        Call::Detach { disk } | Call::SnapshotCreate { disk, .. } => progress::call_with_upload(socket, &request, disk, waiting(&request.command)).await?,
-        command => progress::call_with_spinner(socket, &request, waiting(command)).await?,
+        Call::Detach { disk } | Call::SnapshotCreate { disk, .. } => progress::call_with_upload(socket, &request, disk, message).await?,
+        Call::Restore { target, .. } => progress::call_with_task(socket, &request, target, message).await?,
+        _ => progress::call_with_spinner(socket, &request, message).await?,
     };
     match cli.json {
         true => println!("{}", serde_json::to_string_pretty(&result)?),
@@ -43,7 +47,7 @@ pub async fn run(cli: Cli, config: Config) -> Result<()> {
 async fn watch(config: &Config) -> Result<()> {
     let terminal = console::Term::stdout();
     loop {
-        let result = call(&config.socket, &Request { store: None, command: Call::Status }).await?;
+        let result = call(&config.socket, &Request::default()).await?;
         terminal.clear_screen()?;
         output::print(&Call::Status, &result);
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -63,7 +67,10 @@ fn waiting(command: &Call) -> String {
         Call::Release { disk } => format!("Releasing disk {disk}"),
         Call::Delete { disk } => format!("Deleting disk {disk}"),
         Call::SnapshotDelete { snapshot, .. } => format!("Deleting snapshot {snapshot}"),
-        Call::Restore { target, .. } => format!("Making disk {target}"),
+        Call::Restore { target, .. } => format!("Copying into disk {target}"),
+        Call::BucketAdd => "Checking the bucket".into(),
+        Call::BucketList => "Asking mica".into(),
+        Call::BucketForget { name } => format!("Forgetting bucket {name}"),
     }
 }
 
@@ -88,5 +95,13 @@ fn snapshot_command(command: SnapshotCommand) -> Call {
     match command {
         SnapshotCommand::Create { disk, name } => Call::SnapshotCreate { disk, snapshot: name },
         SnapshotCommand::Delete { disk, name } => Call::SnapshotDelete { disk, snapshot: name },
+    }
+}
+
+fn bucket_command(command: BucketCommand) -> Call {
+    match command {
+        BucketCommand::Add => Call::BucketAdd,
+        BucketCommand::Ls => Call::BucketList,
+        BucketCommand::Forget { name } => Call::BucketForget { name },
     }
 }

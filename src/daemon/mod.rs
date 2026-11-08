@@ -24,6 +24,7 @@ pub mod api;
 mod buckets;
 mod meter;
 mod operations;
+mod tasks;
 
 use crate::config::Config;
 use crate::disk::{Disk, TransactionKind};
@@ -31,7 +32,7 @@ use crate::local::{DiskFolder, KnownBuckets, LocalState, NodeCache};
 use crate::owner::{Claim, NodeId};
 use crate::store::{Bucket, DiskStore, StoreConfig, validate_name};
 use crate::transfers::Transfers;
-use crate::ublk::{UblkDevice, device};
+use crate::ublk::{UblkDevice, device, names};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -52,6 +53,7 @@ pub struct Daemon {
     cache: Arc<NodeCache>,
     transfers: Arc<Transfers>,
     buckets: KnownBuckets,
+    tasks: tasks::Tasks,
     disks: Mutex<HashMap<String, Attached>>,
     /// One attach or detach of each disk at a time.
     locks: std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>,
@@ -75,6 +77,7 @@ impl Daemon {
             cache: NodeCache::load(config.data_dir.join("cache"))?,
             transfers: Transfers::new(),
             buckets: KnownBuckets::new(&config.data_dir),
+            tasks: tasks::Tasks::default(),
             config,
             disks: Mutex::default(),
             locks: Default::default(),
@@ -102,15 +105,20 @@ impl Daemon {
         if folder.exists() && folder.state()? == LocalState::Orphaned {
             bail!("disk {name} has orphaned local data in {}: copy it out, then delete the folder", folder.path.display());
         }
-        let store = self.locate(store, name).await?;
-        let config = store.bucket.config.clone();
-        let mut claim = Claim::take(store, &self.node).await?;
-        if let Err(error) = check_folder(&folder, &claim) {
+        let disk_store = self.locate(store, name).await?;
+        let place = disk_store.bucket.place.clone();
+        let mut claim = Claim::take(disk_store, &self.node).await?;
+        // A reboot serves the disk again with these keys.
+        let kept = match store {
+            Some(store) => self.remember(store).await,
+            None => Ok(()),
+        };
+        if let Err(error) = kept.and_then(|()| check_folder(&folder, &claim)) {
             let _ = claim.release().await;
             return Err(error);
         }
         folder.create(&claim.head().id)?;
-        folder.save_store(&config)?;
+        folder.save_bucket(&place)?;
         let disk = self.open(claim, &folder).await?;
         let profile = disk.claim().await.head().profile.clone();
         let device = match self.start_device(&disk, &folder, None).await {
@@ -140,9 +148,10 @@ impl Daemon {
             (attached.disk.clone(), attached.device.take())
         };
         if let Some(device) = device {
+            let path = device.path.clone();
             tokio::task::spawn_blocking(move || device.stop()).await??;
+            names::unlink(name, &path, &self.config.run_dir);
         }
-        device::unlink(name);
         // A separate task, so the upload goes on when the client goes away.
         tokio::spawn(self.clone().drain(disk)).await??;
         Ok(json!({ "detached": name }))
@@ -205,11 +214,13 @@ impl Daemon {
             return Ok(());
         }
         let paused = folder.ublk()?.filter(|&id| device::exists(id));
-        let Some(store) = folder.saved_store() else {
-            log::error!("disk {}: the folder has no credentials: attach the disk again", folder.disk);
+        let Some(place) = folder.bucket() else {
+            log::error!("disk {}: the folder names no bucket: attach the disk again", folder.disk);
             return remove_paused(paused).await;
         };
-        let _ = self.buckets.remember(&store);
+        let Some(store) = self.buckets.get(&place) else {
+            bail!("this machine has no keys for the bucket {place} any more: give them with `sudo mica bucket add`");
+        };
         let store = DiskStore::new(Arc::new(Bucket::connect(&store)?), &folder.disk);
         if let Some(reason) = lost(&store, &self.node).await? {
             folder.set_state(LocalState::Orphaned)?;
@@ -251,7 +262,7 @@ impl Daemon {
         let disks = self.disks.lock().await;
         let mut list: Vec<Value> = disks.iter().map(|(name, attached)| attached.describe(name)).collect();
         list.sort_by(|a, b| a["disk"].as_str().cmp(&b["disk"].as_str()));
-        json!({ "node": self.node.hostname, "version": env!("CARGO_PKG_VERSION"), "disks": list })
+        json!({ "node": self.node.hostname, "version": env!("CARGO_PKG_VERSION"), "disks": list, "tasks": self.tasks.list() })
     }
 
     async fn run_meters(self: Arc<Self>) {
@@ -282,7 +293,8 @@ impl Daemon {
     }
 
     async fn activate(&self, disk: Arc<Disk>, device: UblkDevice, profile: Vec<u32>) -> Result<String> {
-        let link = device::link(&disk.name, &device.path)?;
+        let (name, path, run_dir) = (disk.name.clone(), device.path.clone(), self.config.run_dir.clone());
+        let link = tokio::task::spawn_blocking(move || names::link(&name, &path, &run_dir)).await??;
         tokio::spawn(disk.clone().run_transactions());
         tokio::spawn(disk.clone().run_writeback());
         tokio::spawn(disk.clone().run_prefetch(profile));
@@ -311,7 +323,7 @@ impl Attached {
         json!({
             "disk": name,
             "device": self.link,
-            "bucket": self.disk.store.bucket.config.place(),
+            "bucket": self.disk.store.bucket.place,
             "detaching": self.device.is_none(),
             "status": self.disk.status(),
             "rates": self.meter.rates(),

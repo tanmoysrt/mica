@@ -121,15 +121,15 @@ impl Disk {
             let snapshot = Snapshot { transaction: new_head.transaction, time: unix_now(), deleting: false };
             new_head.snapshots.insert(name.to_string(), snapshot);
         }
-        if new_head != head {
-            if let Err(error) = claim.write(new_head.clone()).await {
-                memory.uploaded.extend(written);
-                self.unstage(&pending).await;
-                if error.is::<HeadConflict>() {
-                    self.stop("another node took the disk");
-                }
-                return Err(error);
+        if new_head != head
+            && let Err(error) = claim.write(new_head.clone()).await
+        {
+            memory.uploaded.extend(written);
+            self.unstage(&pending).await;
+            if error.is::<HeadConflict>() {
+                self.stop("another node took the disk");
             }
+            return Err(error);
         }
 
         // The new version is current.

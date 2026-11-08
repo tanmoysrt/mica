@@ -155,18 +155,6 @@ fn set_params(dev: &mut UblkDev, size: u64, chunk_size: u32) {
 }
 
 /// `/dev/mica/<disk>` keeps its name, while the number of `ublkbN` can change.
-pub fn link(disk: &str, device: &str) -> Result<String> {
-    let link = format!("/dev/mica/{disk}");
-    std::fs::create_dir_all("/dev/mica")?;
-    let _ = std::fs::remove_file(&link);
-    std::os::unix::fs::symlink(device, &link).with_context(|| format!("create {link}"))?;
-    Ok(link)
-}
-
-pub fn unlink(disk: &str) {
-    let _ = std::fs::remove_file(format!("/dev/mica/{disk}"));
-}
-
 /// True while a program has the device open exclusively, as a mount does.
 pub fn in_use(device: &str) -> bool {
     let path = std::ffi::CString::new(device).unwrap();
