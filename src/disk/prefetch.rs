@@ -100,7 +100,7 @@ impl Disk {
     }
 
     /// Runs read-ahead, then the profile, then the fill, until the disk closes.
-    pub async fn run_prefetch(self: Arc<Self>, profile: Vec<u32>, fill: bool) {
+    pub async fn run_prefetch(self: Arc<Self>, profile: Vec<u32>) {
         let (sender, mut queue) = unbounded_channel::<Range<usize>>();
         *self.ahead.lock().unwrap() = Some(sender);
         let disk = self.clone();
@@ -127,9 +127,7 @@ impl Disk {
         if count > 0 {
             log::info!("disk {}: profile of {count} chunks ready in {} ms", self.name, started.elapsed().as_millis());
         }
-        if fill {
-            self.fill().await;
-        }
+        self.fill().await;
         let _ = ahead.await;
     }
 

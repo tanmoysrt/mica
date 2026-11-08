@@ -10,7 +10,7 @@ mod mount;
 mod output;
 pub mod service;
 
-use crate::config::{Config, parse_size};
+use crate::config::{Config, parse_duration, parse_size};
 use crate::daemon::api::{Request, call};
 use crate::store::StoreConfig;
 use anyhow::Result;
@@ -70,9 +70,6 @@ pub enum DiskCommand {
         /// Take the disk from another node. Only when that node is off.
         #[arg(long)]
         force: bool,
-        /// Do not download the rest of the disk in the background.
-        #[arg(long)]
-        no_fill: bool,
     },
     /// Save all data in the bucket, and give the disk free for other nodes.
     Detach { disk: String },
@@ -84,9 +81,6 @@ pub enum DiskCommand {
         fs: String,
         #[arg(long)]
         force: bool,
-        /// Do not download the rest of the disk in the background.
-        #[arg(long)]
-        no_fill: bool,
     },
     /// Trim, unmount and detach. Takes a disk name or a mount path.
     Unmount { target: String },
@@ -132,12 +126,19 @@ pub struct LimitArgs {
     /// Data not in the bucket yet. Writes wait at this limit.
     #[arg(long)]
     unsaved_size: Option<String>,
+    /// How often a transaction uploads the changes: 30s, 5m, 1h.
+    #[arg(long)]
+    interval: Option<String>,
 }
 
 impl LimitArgs {
     fn request(&self) -> Result<crate::daemon::api::LimitsRequest> {
         let size = |value: &Option<String>| value.as_deref().map(parse_size).transpose();
-        Ok(crate::daemon::api::LimitsRequest { cache_bytes: size(&self.cache_size)?, unsaved_bytes: size(&self.unsaved_size)? })
+        Ok(crate::daemon::api::LimitsRequest {
+            cache_bytes: size(&self.cache_size)?,
+            unsaved_bytes: size(&self.unsaved_size)?,
+            interval_seconds: self.interval.as_deref().map(parse_duration).transpose()?,
+        })
     }
 }
 
@@ -157,10 +158,10 @@ pub async fn run(cli: Cli, config: Config) -> Result<()> {
             chunk_size: chunk_size.as_deref().map(parse_size).transpose()?,
             limits: limits.request()?,
         },
-        Command::Disk(DiskCommand::Attach { disk, force, no_fill }) => Request::Attach { store: store()?, disk, force, fill: !no_fill },
+        Command::Disk(DiskCommand::Attach { disk, force }) => Request::Attach { store: store()?, disk, force },
         Command::Disk(DiskCommand::Detach { disk }) => Request::Detach { disk },
-        Command::Disk(DiskCommand::Mount { disk, path, fs, force, no_fill }) => {
-            let attach = Request::Attach { store: store()?, disk, force, fill: !no_fill };
+        Command::Disk(DiskCommand::Mount { disk, path, fs, force }) => {
+            let attach = Request::Attach { store: store()?, disk, force };
             return mount::mount(&config, attach, &path, &fs).await;
         }
         Command::Disk(DiskCommand::Unmount { target }) => return mount::unmount(&config, &target).await,

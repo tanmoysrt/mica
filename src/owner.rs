@@ -149,7 +149,10 @@ impl Claim {
             self.update(|head| head.snapshots.get_mut(name).unwrap().deleting = true).await?;
         }
         cleanup::merge_snapshot(&self.store, self.head(), snapshot.transaction).await?;
-        self.update(|head| drop(head.snapshots.remove(name))).await
+        self.update(|head| {
+            head.snapshots.remove(name);
+        })
+        .await
     }
 
     /// Gives the disk back. Late uploads of an old owner go now.

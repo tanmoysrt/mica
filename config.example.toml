@@ -1,18 +1,10 @@
 # The node settings of mica. Copy to /etc/mica/config.toml.
 # Each setting is optional. The values here are the defaults.
-# The bucket of a disk is not here: see store.example.toml.
+# The settings of a disk are given at `mica disk create`, and its bucket
+# with --store: see store.example.toml.
 
 socket = "/run/mica.sock"
 # Data files, dirty logs and the chunk cache. Use a local SSD.
 data_dir = "/var/lib/mica"
 # Files that a reboot must remove: bucket credentials and recent bitmaps.
 run_dir = "/run/mica"
-# A transaction uploads the changed chunks at this interval.
-transaction_interval_seconds = 30
-# A transaction starts early when this much data waits for upload.
-transaction_after = "512M"
-# The budgets of a new disk, when `mica disk create` gives none.
-cache_size = "512M"
-unsaved_size = "4G"
-# A disk is "behind" when its oldest unsaved write is older than this.
-max_unsaved_minutes = 5

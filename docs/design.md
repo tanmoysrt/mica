@@ -93,7 +93,7 @@ The head holds:
   "lost": [],               // folders of transactions that never finished
   "snapshots": { "before-upgrade": { "transaction": 37, "time": 1794090000 } },
   "size": 10737418240, "chunk_size": 262144,
-  "limits": { "cache_bytes": 1073741824, "unsaved_bytes": 2147483648 },
+  "limits": { "cache_bytes": 1073741824, "unsaved_bytes": 2147483648, "interval_seconds": 300 },
   "profile": [544, 545, 546],
   "time": 1794094700
 }
@@ -148,7 +148,8 @@ these chunks. A reboot removes both.
 
 ### Transaction
 
-Every 30 seconds, or when 512 MiB waits, a transaction runs:
+At the interval of the disk, 5 minutes by default, a transaction runs. It
+runs early when half the unsaved limit waits. A transaction:
 
 1. Take each unsaved chunk that was not written in the last second. Read
    it under its lock. A chunk of zeros gets the zero entry. A chunk with
@@ -197,8 +198,7 @@ the file data goes into the request pages directly.
 - **Read ahead.** Two sequential reads start a read ahead of 1 MiB, which
   grows to 8 MiB.
 - **Fill.** When the guest is quiet for 250 ms, the rest of the disk
-  downloads into the cache, until the cache is 90 % full. `--no-fill`
-  stops it.
+  downloads into the cache, until the cache is 90 % full.
 
 Reads that wait always come first. The node has 128 download slots: 16
 for read ahead, 32 for fill, and the rest for reads.
@@ -283,16 +283,23 @@ bucket, or one that was deleted and made again. It keeps such data as
 
 ## Budgets
 
-Each disk has two budgets in its head, so they follow the disk:
+Each disk has three limits in its head, so they follow the disk:
 
-- `cache_bytes`: clean chunks kept on the node.
-- `unsaved_bytes`: data not in the bucket yet. Guest writes wait at this limit.
+- `cache_bytes`: clean chunks kept on the node. 512 MiB by default.
+- `unsaved_bytes`: data not in the bucket yet. Guest writes wait at this
+  limit. 4 GiB by default.
+- `interval_seconds`: how often a transaction runs. 5 minutes by default.
+
+A long interval costs few requests: a chunk that the guest writes many
+times in one interval uploads once. A crash loses nothing, because the
+changes are on the local SSD. Only the loss of the node loses them.
 
 The cache budget also limits the saved chunks in the data file. So a disk
 uses at most `unsaved_bytes + 2 × cache_bytes` of the local SSD.
 
-`mica disk set-limits` changes them. A disk is **behind** when its oldest
-unsaved write is older than five minutes.
+`mica disk create` sets them, and `mica disk set-limits` changes them. A
+disk is **behind** when its oldest unsaved write is older than three
+intervals.
 
 ## Credentials
 

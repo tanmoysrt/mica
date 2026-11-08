@@ -37,6 +37,7 @@ pub fn print(request: &Request, result: &Value, snapshots_only: bool) {
                 println!("Transaction:   {} ({})", result["transaction"], ago(&result["time"]));
                 println!("Cache budget:  {}", size(&result["limits"]["cache_bytes"]));
                 println!("Unsaved limit: {}", size(&result["limits"]["unsaved_bytes"]));
+                println!("Interval:      {}", interval(&result["limits"]["interval_seconds"]));
                 println!();
             }
             let rows = rows(&result["snapshots"], |snapshot| {
@@ -56,9 +57,10 @@ pub fn print(request: &Request, result: &Value, snapshots_only: bool) {
         Request::SnapshotDelete { snapshot, .. } => println!("Deleted snapshot {snapshot}"),
         Request::Delete { disk, .. } => println!("Deleted disk {disk}"),
         Request::SetLimits { disk, .. } => println!(
-            "Disk {disk}: cache budget {}, unsaved limit {}",
+            "Disk {disk}: cache budget {}, unsaved limit {}, interval {}",
             size(&result["limits"]["cache_bytes"]),
-            size(&result["limits"]["unsaved_bytes"])
+            size(&result["limits"]["unsaved_bytes"]),
+            interval(&result["limits"]["interval_seconds"])
         ),
         Request::Resize { disk, .. } => println!("Disk {disk} is now {}. Grow its filesystem after the next attach", size(&result["size"])),
     }
@@ -85,6 +87,10 @@ fn table(header: &[&str], rows: Vec<Vec<String>>) {
 
 fn text(value: &Value) -> String {
     value.as_str().unwrap_or("-").to_string()
+}
+
+fn interval(seconds: &Value) -> String {
+    seconds.as_u64().map(crate::config::format_duration).unwrap_or_else(|| "-".into())
 }
 
 fn ago(time: &Value) -> String {

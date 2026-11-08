@@ -179,7 +179,7 @@ impl Disk {
         let mut checked = Instant::now();
         while !self.is_closed() && !self.is_stopped() {
             tokio::select! {
-                _ = tokio::time::sleep(self.tuning.transaction_interval) => {}
+                _ = tokio::time::sleep(self.interval()) => {}
                 _ = self.transaction_wanted.notified() => {}
             }
             if self.is_closed() {

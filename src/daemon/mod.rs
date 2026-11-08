@@ -78,7 +78,7 @@ impl Daemon {
 
     /// Attaches a disk on this node, and returns its device. A disk that is
     /// attached here already gives its device again.
-    pub async fn attach(&self, store: &StoreConfig, name: &str, force: bool, fill: bool) -> Result<Value> {
+    pub async fn attach(&self, store: &StoreConfig, name: &str, force: bool) -> Result<Value> {
         validate_name(name)?;
         let lock = self.lock(name);
         let _one_at_a_time = lock.lock().await;
@@ -111,7 +111,7 @@ impl Daemon {
             }
         };
         let blank = disk.is_blank();
-        let link = self.activate(disk, device, profile, fill).await?;
+        let link = self.activate(disk, device, profile).await?;
         Ok(json!({ "device": link, "blank": blank }))
     }
 
@@ -207,7 +207,7 @@ impl Daemon {
         let disk = self.open(claim, folder).await?;
         let device = self.start_device(&disk, folder, paused).await?;
         log::info!("disk {}: serves {} again after the restart", disk.name, device.path);
-        self.activate(disk, device, Vec::new(), true).await?;
+        self.activate(disk, device, Vec::new()).await?;
         Ok(())
     }
 
@@ -244,7 +244,7 @@ impl Daemon {
     async fn open(&self, claim: Claim, folder: &DiskFolder) -> Result<Arc<Disk>> {
         let limits = claim.head().limits;
         let cache = self.cache.for_disk(&folder.disk, limits.cache_bytes);
-        Disk::open(claim, folder, cache, self.transfers.clone(), self.config.tuning()).await.context("open the local data")
+        Disk::open(claim, folder, cache, self.transfers.clone()).await.context("open the local data")
     }
 
     async fn start_device(&self, disk: &Arc<Disk>, folder: &DiskFolder, paused: Option<i32>) -> Result<UblkDevice> {
@@ -258,11 +258,11 @@ impl Daemon {
         Ok(device)
     }
 
-    async fn activate(&self, disk: Arc<Disk>, device: UblkDevice, profile: Vec<u32>, fill: bool) -> Result<String> {
+    async fn activate(&self, disk: Arc<Disk>, device: UblkDevice, profile: Vec<u32>) -> Result<String> {
         let link = device::link(&disk.name, &device.path)?;
         tokio::spawn(disk.clone().run_transactions());
         tokio::spawn(disk.clone().run_writeback());
-        tokio::spawn(disk.clone().run_prefetch(profile, fill));
+        tokio::spawn(disk.clone().run_prefetch(profile));
         log::info!("disk {}: attached as {}", disk.name, device.path);
         let name = disk.name.clone();
         self.disks.lock().await.insert(name, Attached { disk, device: Some(device), link: link.clone() });

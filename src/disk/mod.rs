@@ -9,8 +9,8 @@
 //! - A local chunk has its current content in the data files.
 //! - An unsaved chunk is a local chunk whose content is maybe not in the store.
 //! - A saved chunk is a local chunk whose content is in the store. Saved
-//!   chunks stay local for a short time, because the guest often writes
-//!   them again. Then they move into the cache.
+//!   chunks stay local up to the cache budget, because the guest often
+//!   writes them again. Then they move into the cache.
 //!
 //! The code is in four files: `io.rs` (read, write, flush), `fast.rs` (the
 //! requests that a queue thread serves alone), `transaction.rs` and
@@ -41,16 +41,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
-
-/// Settings of the node that apply to each disk.
-#[derive(Clone, Debug)]
-pub struct Tuning {
-    pub transaction_interval: Duration,
-    /// A transaction starts early when this much unsaved data waits.
-    pub transaction_after: u64,
-    /// A disk is behind when its oldest unsaved write is older than this.
-    pub max_unsaved_age: Duration,
-}
 
 pub struct Disk {
     pub name: String,
@@ -83,7 +73,6 @@ pub struct Disk {
     unpunched: Mutex<Vec<usize>>,
     downloads: Mutex<HashMap<crate::store::Hash, Arc<tokio::sync::Mutex<()>>>>,
 
-    /// Data files written since the last flush.
     /// Writes went into the data file since the last sync.
     unsynced: AtomicBool,
     /// Writes done, and how many of them a flush made durable.
@@ -94,7 +83,6 @@ pub struct Disk {
     writeback_wanted: Notify,
 
     limits: Mutex<Limits>,
-    tuning: Tuning,
     transaction_wanted: Notify,
     room: Notify,
     oldest_unsaved: Mutex<Option<Instant>>,
@@ -157,7 +145,6 @@ impl Disk {
         folder: &DiskFolder,
         cache: ChunkCache,
         transfers: Arc<Transfers>,
-        tuning: Tuning,
     ) -> Result<Arc<Self>> {
         let head = claim.head().clone();
         let store = claim.store.clone();
@@ -196,14 +183,12 @@ impl Disk {
             downloads: Mutex::default(),
             // The first flush syncs what a crashed daemon left.
             unsynced: AtomicBool::new(true),
-            // Above zero: the first flush syncs what a crashed daemon left.
             writes_done: AtomicU64::new(1),
             writes_synced: AtomicU64::new(0),
             flushing: Default::default(),
             written_bytes: AtomicU64::new(0),
             writeback_wanted: Notify::new(),
             limits: Mutex::new(head.limits),
-            tuning,
             transaction_wanted: Notify::new(),
             room: Notify::new(),
             oldest_unsaved: Mutex::new(None),
@@ -286,8 +271,13 @@ impl Disk {
         }
     }
 
+    /// Behind: the oldest unsaved write missed three transactions.
     pub fn is_behind(&self) -> bool {
-        self.oldest_unsaved.lock().unwrap().is_some_and(|since| since.elapsed() > self.tuning.max_unsaved_age)
+        self.oldest_unsaved.lock().unwrap().is_some_and(|since| since.elapsed() > 3 * self.interval())
+    }
+
+    pub fn interval(&self) -> Duration {
+        Duration::from_secs(self.limits.lock().unwrap().interval_seconds.max(1))
     }
 
     pub fn has_unsaved(&self) -> bool {

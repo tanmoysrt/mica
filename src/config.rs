@@ -1,13 +1,13 @@
-//! The settings of the node, in `/etc/mica/config.toml`.
+//! The settings of the node, in `/etc/mica/config.toml`: three paths.
 //!
-//! The file is optional: each setting has a default. The settings of the
-//! bucket are not here. Each disk has its own bucket, and its credentials
-//! come with each command (see `store::StoreConfig`).
+//! The file is optional: each path has a default. The settings of a disk
+//! are not here. They are in the head of the disk, so they follow the disk
+//! between nodes (see `store::Limits`). The bucket of a disk comes with each
+//! command (see `store::StoreConfig`).
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 pub const DEFAULT_PATH: &str = "/etc/mica/config.toml";
 
@@ -20,14 +20,6 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// Files that must not survive a reboot: credentials and recent bitmaps.
     pub run_dir: PathBuf,
-    pub transaction_interval_seconds: u64,
-    /// A transaction starts early when this much unsaved data waits.
-    pub transaction_after: String,
-    /// The budgets of a new disk, when `mica disk create` gives none.
-    pub cache_size: String,
-    pub unsaved_size: String,
-    /// A disk is behind when its oldest unsaved write is older than this.
-    pub max_unsaved_minutes: u64,
 }
 
 impl Default for Config {
@@ -36,11 +28,6 @@ impl Default for Config {
             socket: "/run/mica.sock".into(),
             data_dir: "/var/lib/mica".into(),
             run_dir: "/run/mica".into(),
-            transaction_interval_seconds: 30,
-            transaction_after: "512M".into(),
-            cache_size: "512M".into(),
-            unsaved_size: "4G".into(),
-            max_unsaved_minutes: 5,
         }
     }
 }
@@ -55,20 +42,9 @@ impl Config {
             }
             Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
         };
-        let config: Self = toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
-        for size in [&config.transaction_after, &config.cache_size, &config.unsaved_size] {
-            parse_size(size)?;
-        }
-        Ok(config)
+        toml::from_str(&text).with_context(|| format!("parse {}", path.display()))
     }
 
-    pub fn tuning(&self) -> crate::disk::Tuning {
-        crate::disk::Tuning {
-            transaction_interval: Duration::from_secs(self.transaction_interval_seconds.max(1)),
-            transaction_after: parse_size(&self.transaction_after).unwrap_or(512 << 20),
-            max_unsaved_age: Duration::from_secs(self.max_unsaved_minutes * 60),
-        }
-    }
 }
 
 /// Plain bytes, or a number with K, M, G or T (powers of 1024).
@@ -85,6 +61,28 @@ pub fn parse_size(text: &str) -> Result<u64> {
     };
     let number: u64 = number.parse().with_context(|| format!("bad size {text:?}"))?;
     number.checked_mul(1 << shift).with_context(|| format!("size {text:?} is too large"))
+}
+
+/// Seconds, or a number with s, m or h.
+pub fn parse_duration(text: &str) -> Result<u64> {
+    let text = text.trim();
+    let (number, unit) = text.split_at(text.find(|c: char| !c.is_ascii_digit()).unwrap_or(text.len()));
+    let scale = match unit.trim() {
+        "" | "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        _ => bail!("bad interval {text:?}: use a number with s, m or h"),
+    };
+    let number: u64 = number.parse().with_context(|| format!("bad interval {text:?}"))?;
+    Ok(number * scale)
+}
+
+pub fn format_duration(seconds: u64) -> String {
+    match seconds {
+        _ if seconds.is_multiple_of(3600) => format!("{}h", seconds / 3600),
+        _ if seconds.is_multiple_of(60) => format!("{}m", seconds / 60),
+        _ => format!("{seconds}s"),
+    }
 }
 
 pub fn format_size(bytes: u64) -> String {
@@ -113,5 +111,9 @@ mod tests {
         assert_eq!(parse_size("4096").unwrap(), 4096);
         assert!(parse_size("1X").is_err());
         assert_eq!(format_size(3 << 29), "1.5GiB");
+        assert_eq!(parse_duration("5m").unwrap(), 300);
+        assert_eq!(parse_duration("90").unwrap(), 90);
+        assert!(parse_duration("5d").is_err());
+        assert_eq!(format_duration(300), "5m");
     }
 }

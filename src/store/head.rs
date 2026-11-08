@@ -56,13 +56,21 @@ pub struct Snapshot {
     pub deleting: bool,
 }
 
-/// Budgets of the disk on a node. They follow the disk between nodes.
+/// The budgets of the disk on a node. They follow the disk between nodes.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Limits {
     /// Clean chunks kept on the node.
     pub cache_bytes: u64,
     /// Data not in the store yet. Guest writes wait at this limit.
     pub unsaved_bytes: u64,
+    /// A transaction uploads the changes at this interval.
+    pub interval_seconds: u64,
+}
+
+impl Limits {
+    /// A long interval costs few requests. A crash loses nothing, because
+    /// the changes are on the local disk. Only a lost node loses them.
+    pub const DEFAULT: Limits = Limits { cache_bytes: 512 << 20, unsaved_bytes: 4 << 30, interval_seconds: 300 };
 }
 
 impl Head {

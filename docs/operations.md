@@ -76,19 +76,19 @@ mica disk.
 |---|---|
 | `mica status` | The disks attached on this node, their unsaved data and cache |
 | `mica disk ls` | The disks in the bucket |
-| `mica disk info <disk>` | One disk, its budgets and snapshots |
-| `mica disk create <disk> --size 20G [--chunk-size 256K] [--cache-size 1G] [--unsaved-size 4G]` | A new, empty disk |
-| `mica disk attach <disk> [--force] [--no-fill]` | Makes `/dev/mica/<disk>` |
-| `mica disk mount <disk> <path> [--fs ext4] [--no-fill]` | Attach, format when new, mount |
+| `mica disk info <disk>` | One disk, its limits and snapshots |
+| `mica disk create <disk> --size 20G [--chunk-size 256K] [--cache-size 512M] [--unsaved-size 4G] [--interval 5m]` | A new, empty disk |
+| `mica disk attach <disk> [--force]` | Makes `/dev/mica/<disk>` |
+| `mica disk mount <disk> <path> [--fs ext4] [--force]` | Attach, format when new, mount |
 | `mica disk unmount <disk or path>` | Trim, unmount, detach |
 | `mica disk detach <disk>` | Upload all data and give the disk free |
 | `mica disk commit <disk>` | Run a transaction now |
-| `mica disk set-limits <disk> [--cache-size] [--unsaved-size]` | New budgets, kept in the head |
+| `mica disk set-limits <disk> [--cache-size] [--unsaved-size] [--interval]` | New limits, kept in the head |
 | `mica disk resize <disk> --size 40G` | A larger disk (detached only) |
 | `mica disk restore <disk> <snapshot> <new disk>` | A new disk from a snapshot |
 | `mica disk delete <disk>` | Delete the disk and its snapshots |
 | `mica snapshot ls / create / delete <disk> <name>` | Snapshots |
-| `mica service install / uninstall / start / stop / restart / status / logs` | The systemd unit |
+| `mica service install / uninstall` | The systemd unit `mica.service` |
 | `mica service add-disk <disk> <path>` / `remove-disk <disk>` | Mount a disk at each boot |
 
 `--json` prints the answer of the daemon as JSON. `mica status --json`
@@ -147,7 +147,7 @@ let `add-disk` do it.
 | `… has orphaned local data` | The folder holds data that is not in the bucket | Same as above. |
 | `the local data … is of another disk` | A disk with this name was deleted and made again | The old data is kept as orphaned. |
 | `this store cannot hold mica disks` | The bucket ignores conditional writes | Use another bucket or provider. |
-| `upload is behind` in `mica status` | Unsaved data is older than five minutes | Check the network and the bucket. Writes wait at the unsaved limit. |
+| `upload is behind` in `mica status` | Unsaved data missed three transactions | Check the network and the bucket. Writes wait at the unsaved limit. |
 | `stopped: a local sync failed` | The local SSD failed a write | The disk refuses I/O. Check the SSD. |
 
-`mica service logs -f` shows the log of the daemon.
+`journalctl -u mica -f` shows the log of the daemon.

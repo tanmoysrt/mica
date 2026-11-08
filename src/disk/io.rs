@@ -162,10 +162,9 @@ impl Disk {
             return Ok(());
         }
         let upto = self.writes_done.load(Ordering::SeqCst);
-        // Taken before the syncs: each chunk in it wrote its data before it was listed.
+        // Taken before the sync. A write marks the file before the log learns
+        // of its chunk, so the sync makes the data of each listed chunk durable.
         let unlogged = self.log.take_unlogged();
-        // A write marks the file before the log learns of its chunk, so the
-        // file holds the data of each chunk in `unlogged`.
         let unsynced = self.unsynced.swap(false, Ordering::SeqCst);
         let (file, synced) = (self.data.file().clone(), Instant::now());
         let mut result = match unsynced {
@@ -254,8 +253,8 @@ impl Disk {
                 unsaved.insert(index);
                 unsaved.len()
             };
-            let early = (self.tuning.transaction_after / self.chunk_size) as usize;
-            if count >= early.min(self.unsaved_limit() / 2).max(1) {
+            // Half the limit starts a transaction early, so writes seldom wait.
+            if count >= (self.unsaved_limit() / 2).max(1) {
                 self.transaction_wanted.notify_one();
             }
         }

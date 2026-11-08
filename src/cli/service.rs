@@ -25,14 +25,6 @@ pub enum ServiceCommand {
     Install,
     /// Stop mica and remove the unit. Refused while disks are attached.
     Uninstall,
-    Start,
-    Stop,
-    Restart,
-    Status,
-    Logs {
-        #[arg(short, long)]
-        follow: bool,
-    },
     /// Mount a disk at each boot, for the user who runs sudo. Needs --store.
     AddDisk { disk: String, path: std::path::PathBuf },
     /// Stop the mount at boot. The disk stays in its bucket.
@@ -56,17 +48,6 @@ pub fn run(command: ServiceCommand, config: &Path, store: Option<&Path>) -> Resu
             systemctl(&["disable", "--now", "mica.service"])?;
             std::fs::remove_file(UNIT).with_context(|| format!("remove {UNIT}"))?;
             systemctl(&["daemon-reload"])
-        }
-        ServiceCommand::Start => systemctl(&["start", "mica.service"]),
-        ServiceCommand::Stop => systemctl(&["stop", "mica.service"]),
-        ServiceCommand::Restart => systemctl(&["restart", "mica.service"]),
-        ServiceCommand::Status => systemctl(&["status", "--no-pager", "mica.service"]),
-        ServiceCommand::Logs { follow } => {
-            let mut args = vec!["-u", "mica.service", "--no-pager"];
-            if follow {
-                args.push("-f");
-            }
-            check(Command::new("journalctl").args(args).status()?, "journalctl")
         }
     }
 }

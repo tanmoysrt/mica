@@ -12,7 +12,6 @@
 //! version that already dropped it.
 
 use super::Daemon;
-use crate::config::parse_size;
 use crate::disk::TransactionKind;
 use crate::owner::{Claim, unix_now};
 use crate::store::format::{CHUNKS_PER_PAGE, DEFAULT_CHUNK_SIZE, validate_chunk_size};
@@ -31,7 +30,7 @@ impl Daemon {
         validate_chunk_size(chunk_size)?;
         ensure!(size >= chunk_size, "the size must be at least one chunk");
         let size = size.next_multiple_of(chunk_size);
-        let limits = limits.apply(self.default_limits()?, chunk_size)?;
+        let limits = limits.apply(Limits::DEFAULT, chunk_size)?;
         let disk = DiskStore::new(Arc::new(Bucket::connect(store)?), name);
         disk.bucket.check_conditional_writes().await?;
         disk.create_head(&Head::new(size, chunk_size, limits, None)).await?;
@@ -78,7 +77,9 @@ impl Daemon {
             .with_claim(store, name, async |claim| {
                 ensure!(!claim.head().snapshots.contains_key(snapshot), "disk {name} has a snapshot {snapshot} already");
                 let transaction = claim.head().transaction;
-                claim.update(|head| drop(head.snapshots.insert(snapshot.into(), Snapshot { transaction, time: unix_now(), deleting: false }))).await?;
+                claim.update(|head| {
+            head.snapshots.insert(snapshot.into(), Snapshot { transaction, time: unix_now(), deleting: false });
+        }).await?;
                 Ok(transaction)
             })
             .await?;
@@ -205,9 +206,6 @@ impl Daemon {
         Ok(value)
     }
 
-    fn default_limits(&self) -> Result<Limits> {
-        Ok(Limits { cache_bytes: parse_size(&self.config.cache_size)?, unsaved_bytes: parse_size(&self.config.unsaved_size)? })
-    }
 }
 
 /// New budgets for a disk. A missing field keeps the old value.
@@ -215,6 +213,7 @@ impl Daemon {
 pub struct LimitsRequest {
     pub cache_bytes: Option<u64>,
     pub unsaved_bytes: Option<u64>,
+    pub interval_seconds: Option<u64>,
 }
 
 impl LimitsRequest {
@@ -222,9 +221,11 @@ impl LimitsRequest {
         let limits = Limits {
             cache_bytes: self.cache_bytes.unwrap_or(old.cache_bytes),
             unsaved_bytes: self.unsaved_bytes.unwrap_or(old.unsaved_bytes),
+            interval_seconds: self.interval_seconds.unwrap_or(old.interval_seconds),
         };
         ensure!(limits.cache_bytes >= chunk_size, "the cache must hold at least one chunk");
         ensure!(limits.unsaved_bytes >= 2 * chunk_size, "the unsaved data must allow at least two chunks");
+        ensure!((1..=86_400).contains(&limits.interval_seconds), "the interval must be from 1 second to 24 hours");
         Ok(limits)
     }
 }

@@ -34,7 +34,7 @@ impl Rig {
     }
 
     async fn create(&self, name: &str) {
-        let limits = Limits { cache_bytes: 4 * CHUNK, unsaved_bytes: 1024 * CHUNK };
+        let limits = Limits { cache_bytes: 4 * CHUNK, unsaved_bytes: 1024 * CHUNK, interval_seconds: 1 };
         let mut claim = Claim::create(self.store(name), &self.node, Head::new(SIZE, CHUNK, limits, None)).await.unwrap();
         claim.release().await.unwrap();
     }
@@ -43,13 +43,8 @@ impl Rig {
         let claim = Claim::take(self.store(name), &self.node, false).await.unwrap();
         let folder = DiskFolder::new(&self.root.join("data"), &self.root.join("run"), name);
         folder.create(&claim.head().id).unwrap();
-        let tuning = Tuning {
-            transaction_interval: Duration::from_millis(20),
-            transaction_after: 8 * CHUNK,
-            max_unsaved_age: Duration::from_secs(300),
-        };
         let cache = self.cache.for_disk(name, 64 * CHUNK);
-        Disk::open(claim, &folder, cache, Transfers::new(), tuning).await.unwrap()
+        Disk::open(claim, &folder, cache, Transfers::new()).await.unwrap()
     }
 
     async fn detach(&self, disk: Arc<Disk>) {
