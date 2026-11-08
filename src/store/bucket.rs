@@ -1,7 +1,7 @@
 //! The S3 bucket of a disk, and the credentials to reach it.
 //!
-//! Each disk names its own bucket: the user passes the credentials with
-//! each command, and the daemon keeps them only for the disks it serves.
+//! Each disk names its own bucket. The user gives the credentials of a
+//! bucket once, and the daemon keeps them (see `local::buckets`).
 
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
@@ -30,6 +30,15 @@ impl StoreConfig {
     pub fn read(path: &std::path::Path) -> Result<Self> {
         let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
         toml::from_str(&text).with_context(|| format!("parse {}", path.display()))
+    }
+
+    /// Writes the config to a file that only root reads.
+    pub fn save(&self, path: &std::path::Path) -> Result<()> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true).mode(0o600);
+        std::io::Write::write_all(&mut options.open(path)?, toml::to_string(self)?.as_bytes())?;
+        Ok(())
     }
 
     /// Refuses a config without a bucket. A missing region is `auto`.
@@ -69,6 +78,7 @@ pub enum Written {
 pub struct Bucket {
     store: Arc<dyn ObjectStore>,
     prefix: String,
+    pub config: StoreConfig,
     pub counts: Counts,
     /// A test store that writes over conditions, as Garage does.
     #[cfg(test)]
@@ -100,13 +110,13 @@ impl Bucket {
             .with_allow_http(config.endpoint.starts_with("http://"))
             .build()
             .context("create S3 client")?;
-        Ok(Self::over(Arc::new(store), &config.prefix))
+        Ok(Self::over(Arc::new(store), config.clone()))
     }
 
     /// A bucket in memory, for tests.
     #[cfg(test)]
     pub fn in_memory() -> Self {
-        Self::over(Arc::new(object_store::memory::InMemory::new()), "test")
+        Self::over(Arc::new(object_store::memory::InMemory::new()), StoreConfig { prefix: "test".into(), ..StoreConfig::default() })
     }
 
     #[cfg(test)]
@@ -114,10 +124,11 @@ impl Bucket {
         Self { ignores_conditions: true, ..Self::in_memory() }
     }
 
-    fn over(store: Arc<dyn ObjectStore>, prefix: &str) -> Self {
+    fn over(store: Arc<dyn ObjectStore>, config: StoreConfig) -> Self {
         Self {
             store,
-            prefix: prefix.trim_matches('/').to_string(),
+            prefix: config.prefix.trim_matches('/').to_string(),
+            config,
             counts: Counts::default(),
             #[cfg(test)]
             ignores_conditions: false,

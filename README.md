@@ -32,9 +32,8 @@ cargo install --git https://github.com/tanmoysrt/mica
 sudo cp ~/.cargo/bin/mica /usr/local/bin/
 sudo mica service install
 
-sudo cp store.example.toml /etc/mica/store.toml   # then fill in the bucket
-sudo chmod 600 /etc/mica/store.toml
-sudo mica disk create data-1 --size 20G
+cp store.example.toml s3.toml && chmod 600 s3.toml   # then fill in the bucket
+sudo mica disk create data-1 --size 20G --store s3.toml   # mica keeps the bucket
 sudo mica disk attach data-1                      # makes /dev/mica/data-1
 sudo mkfs.ext4 /dev/mica/data-1
 sudo mkdir -p /mnt/data-1 && sudo mount -o discard /dev/mica/data-1 /mnt/data-1
@@ -42,11 +41,11 @@ echo hello | sudo tee /mnt/data-1/hello.txt
 sudo umount /mnt/data-1 && sudo mica disk detach data-1
 ```
 
-`detach` returns when the bucket has all data, so the disk is ready to move.
-On another machine with the same `/etc/mica/store.toml`:
+`detach` shows the upload, and returns when the bucket has all data. Then
+the disk is ready to move. On another machine, give the bucket once:
 
 ```bash
-sudo mica disk attach data-1
+sudo mica disk attach data-1 --store s3.toml
 sudo mount -o discard /dev/mica/data-1 /mnt/data-1
 cat /mnt/data-1/hello.txt
 ```

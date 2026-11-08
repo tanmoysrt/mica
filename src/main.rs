@@ -28,9 +28,15 @@ use anyhow::{Result, bail};
 use clap::Parser;
 use cli::{Cli, Command};
 
-fn main() -> Result<()> {
+fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let cli = Cli::parse();
+    if let Err(error) = run(Cli::parse()) {
+        eprintln!("{} {error:#}", console::style("error:").red().bold());
+        std::process::exit(1);
+    }
+}
+
+fn run(cli: Cli) -> Result<()> {
     let config = config::Config::load(&cli.config)?;
     if let Command::Daemon = cli.command {
         if unsafe { libc::geteuid() } != 0 {

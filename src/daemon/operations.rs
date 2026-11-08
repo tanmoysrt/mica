@@ -1,4 +1,5 @@
-//! The operations on disks in the store.
+//! The operations on disks in the store. Each takes the bucket from the
+//! request, else finds it with `Daemon::locate`.
 //!
 //! Only the owner changes the head of a disk. So each operation runs with
 //! the claim of the disk: the claim of the attached disk when this node
@@ -23,28 +24,48 @@ use std::sync::Arc;
 
 const PARALLEL: usize = 64;
 
-const NO_CONDITIONS: &str = "this store ignores conditional writes, so mica cannot stop two nodes from using the disk at once: attach it on one node only";
+const NO_CONDITIONS: &str = "this bucket ignores conditional writes, so mica cannot stop two machines from using the disk at once. Attach it on one machine only";
 
 impl Daemon {
-    pub async fn create(&self, store: &StoreConfig, name: &str, size: u64, chunk_size: Option<u64>, limits: LimitsRequest) -> Result<Value> {
+    pub async fn create(&self, store: Option<&StoreConfig>, name: &str, size: u64, chunk_size: Option<u64>, limits: LimitsRequest) -> Result<Value> {
         validate_name(name)?;
         let chunk_size = chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE);
         validate_chunk_size(chunk_size)?;
         ensure!(size >= chunk_size, "the size must be at least one chunk");
         let size = size.next_multiple_of(chunk_size);
         let limits = limits.apply(Limits::DEFAULT, chunk_size)?;
-        let disk = DiskStore::new(Arc::new(Bucket::connect(store)?), name);
+        let disk = DiskStore::new(Arc::new(Bucket::connect(&self.bucket(store)?)?), name);
         let conditions = disk.bucket.check_conditional_writes().await?;
         disk.create_head(&Head::new(size, chunk_size, limits, None)).await?;
         let warning = (!conditions).then_some(NO_CONDITIONS);
         Ok(json!({ "disk": name, "size": size, "chunk_size": chunk_size, "warning": warning }))
     }
 
-    /// Lists the disks of a bucket: one listing, then one read of each head.
-    pub async fn list(&self, store: &StoreConfig) -> Result<Value> {
+    /// Lists the disks of the given bucket, else of each bucket that this
+    /// node knows. A disk attached here shows its local state too.
+    pub async fn list(&self, store: Option<&StoreConfig>) -> Result<Value> {
+        let stores = match store {
+            Some(store) => vec![store.clone()],
+            None => self.buckets.all(),
+        };
+        ensure!(!stores.is_empty(), "this machine knows no bucket yet: {}", self.no_bucket_hint());
+        let mut disks = Vec::new();
+        for store in &stores {
+            for mut disk in self.list_bucket(store).await? {
+                disk["bucket"] = store.place().into();
+                disk["local"] = self.local_state(&disk).await;
+                disk["cache_bytes"] = self.cache.bytes(disk["disk"].as_str().unwrap_or_default()).into();
+                disks.push(disk);
+            }
+        }
+        Ok(json!({ "buckets": stores.iter().map(StoreConfig::place).collect::<Vec<_>>(), "disks": disks }))
+    }
+
+    /// One listing, then one read of each head.
+    async fn list_bucket(&self, store: &StoreConfig) -> Result<Vec<Value>> {
         let bucket = Arc::new(Bucket::connect(store)?);
         let names = disk_store::disk_names(&bucket).await?;
-        let heads: Vec<Value> = futures::stream::iter(names)
+        futures::stream::iter(names)
             .map(|name| {
                 let store = DiskStore::new(bucket.clone(), &name);
                 async move { Ok::<_, anyhow::Error>(store.head().await?.map(|head| describe(&name, &head.head))) }
@@ -52,18 +73,27 @@ impl Daemon {
             .buffered(16)
             .try_filter_map(|value| async move { Ok(value) })
             .try_collect()
-            .await?;
-        Ok(json!({ "disks": heads }))
+            .await
     }
 
-    pub async fn info(&self, store: &StoreConfig, name: &str) -> Result<Value> {
-        let disk = DiskStore::new(Arc::new(Bucket::connect(store)?), name);
-        Ok(describe(name, &disk.require_head().await?.head))
+    pub async fn info(&self, store: Option<&StoreConfig>, name: &str) -> Result<Value> {
+        let disk = self.locate(store, name).await?;
+        let mut info = describe(name, &disk.require_head().await?.head);
+        info["bucket"] = disk.bucket.config.place().into();
+        info["local"] = self.local_state(&info).await;
+        Ok(info)
+    }
+
+    /// The state on this node of a disk from the bucket, when it is attached here.
+    async fn local_state(&self, disk: &Value) -> Value {
+        let status = self.status().await;
+        let here = status["disks"].as_array().into_iter().flatten().find(|attached| attached["disk"] == disk["disk"] && attached["bucket"] == disk["bucket"]);
+        here.cloned().unwrap_or_default()
     }
 
     /// Takes a snapshot. On an attached disk, it is a transaction of all
     /// unsaved chunks whose head write also adds the name.
-    pub async fn create_snapshot(&self, store: &StoreConfig, name: &str, snapshot: &str) -> Result<Value> {
+    pub async fn create_snapshot(&self, store: Option<&StoreConfig>, name: &str, snapshot: &str) -> Result<Value> {
         validate_name(snapshot)?;
         if let Some(disk) = self.attached(name).await {
             let transaction = disk.transaction(TransactionKind::All, Some(snapshot)).await?;
@@ -84,16 +114,16 @@ impl Daemon {
         Ok(json!({ "disk": name, "snapshot": snapshot, "transaction": transaction }))
     }
 
-    pub async fn delete_snapshot(&self, store: &StoreConfig, name: &str, snapshot: &str) -> Result<Value> {
+    pub async fn delete_snapshot(&self, store: Option<&StoreConfig>, name: &str, snapshot: &str) -> Result<Value> {
         self.with_claim(store, name, async |claim| claim.delete_snapshot(snapshot).await).await?;
         Ok(json!({ "disk": name, "deleted": snapshot }))
     }
 
     /// Changes the limits, and makes the disk larger. A new size needs a
     /// detached disk: grow its filesystem after the next attach.
-    pub async fn set(&self, store: &StoreConfig, name: &str, size: Option<u64>, request: LimitsRequest) -> Result<Value> {
+    pub async fn set(&self, store: Option<&StoreConfig>, name: &str, size: Option<u64>, request: LimitsRequest) -> Result<Value> {
         if size.is_some() && self.attached(name).await.is_some() {
-            bail!("disk {name} is attached: detach it before a new size");
+            bail!("a new size needs a detached disk: detach {name}, set the size, attach it again and grow its filesystem");
         }
         let head = self
             .with_claim(store, name, async |claim| {
@@ -116,14 +146,14 @@ impl Daemon {
         Ok(describe(name, &head))
     }
 
-    pub async fn release(&self, store: &StoreConfig, name: &str) -> Result<Value> {
-        let disk = DiskStore::new(Arc::new(Bucket::connect(store)?), name);
+    pub async fn release(&self, store: Option<&StoreConfig>, name: &str) -> Result<Value> {
+        let disk = self.locate(store, name).await?;
         let node = Claim::release_from(&disk, &self.node).await?;
         Ok(json!({ "disk": name, "released_from": node }))
     }
 
     /// Makes the new disk `target` from a snapshot of `name`.
-    pub async fn restore(&self, store: &StoreConfig, name: &str, snapshot: &str, target: &str) -> Result<Value> {
+    pub async fn restore(&self, store: Option<&StoreConfig>, name: &str, snapshot: &str, target: &str) -> Result<Value> {
         validate_name(target)?;
         let copied = self.with_claim(store, name, async |claim| self.copy_snapshot(claim, snapshot, target).await).await?;
         Ok(json!({ "disk": target, "from": name, "snapshot": snapshot, "copied_objects": copied }))
@@ -170,14 +200,14 @@ impl Daemon {
 
     /// Deletes a disk and all its snapshots. A crash leaves the head marked
     /// as deleted, and the same command finishes the delete.
-    pub async fn delete(&self, store: &StoreConfig, name: &str) -> Result<Value> {
+    pub async fn delete(&self, store: Option<&StoreConfig>, name: &str) -> Result<Value> {
         if self.attached(name).await.is_some() {
-            bail!("disk {name} is attached here: detach it first");
+            bail!("disk {name} is attached on this machine: detach it first with `sudo mica disk detach {name}`");
         }
-        let disk = DiskStore::new(Arc::new(Bucket::connect(store)?), name);
+        let disk = self.locate(store, name).await?;
         let current = disk.require_head().await?;
         if let Some(owner) = current.head.owner.as_ref().filter(|owner| owner.id != self.node.id) {
-            bail!("disk {name} is attached on {}", owner.node);
+            bail!("disk {name} is attached on {}: detach it there first", owner.node);
         }
         if !current.head.deleted {
             let mut head = current.head.clone();
@@ -194,11 +224,11 @@ impl Daemon {
     }
 
     /// Runs `operation` with the claim of the disk.
-    async fn with_claim<T>(&self, store: &StoreConfig, name: &str, operation: impl AsyncFnOnce(&mut Claim) -> Result<T>) -> Result<T> {
+    async fn with_claim<T>(&self, store: Option<&StoreConfig>, name: &str, operation: impl AsyncFnOnce(&mut Claim) -> Result<T>) -> Result<T> {
         if let Some(disk) = self.attached(name).await {
             return operation(&mut *disk.claim().await).await;
         }
-        let disk = DiskStore::new(Arc::new(Bucket::connect(store)?), name);
+        let disk = self.locate(store, name).await?;
         let mut claim = Claim::take(disk, &self.node).await?;
         let result = operation(&mut claim).await;
         let released = claim.release().await;

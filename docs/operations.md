@@ -12,8 +12,8 @@ when something goes wrong. [design.md](design.md) explains how mica works.
 - An S3 bucket, best with conditional writes (`If-Match` and
   `If-None-Match`): AWS S3, Cloudflare R2, MinIO and RustFS have them.
   `mica disk create` checks the bucket first. A bucket that ignores them,
-  such as Garage, works, but mica cannot stop two nodes from using one disk
-  there: attach each disk on one node only. A bucket that refuses them,
+  such as Garage, works, but mica cannot stop two machines from using one
+  disk there: attach each disk on one machine only. A bucket that refuses them,
   such as Backblaze B2, cannot hold mica disks.
 
 ## Install
@@ -24,55 +24,61 @@ sudo cp ~/.cargo/bin/mica /usr/local/bin/
 sudo mica service install       # writes mica.service, starts it, and starts it at boot
 ```
 
-The node settings are in `/etc/mica/config.toml`. The file is optional:
+`mica service install` also upgrades: after a new binary, it restarts mica.
+The attached disks pause for about one second.
+
+The machine settings are in `/etc/mica/config.toml`. The file is optional:
 see [config.example.toml](../config.example.toml) for each setting and its
 default.
 
 ## The bucket of a disk
 
-Each command that uses the bucket needs its place and its keys. mica
-takes each value from the first of these that gives it:
+The first command on a bucket needs its place and its keys, such as the
+first `mica disk create`, or the first `mica disk attach` of a disk that
+another machine made. mica keeps a bucket that works, root only, in
+`/var/lib/mica/buckets/`. Later commands need only the name of the disk:
+mica finds the disk in the buckets that it knows. A new disk goes to the
+one bucket that mica knows. With more than one, give the bucket again.
+
+mica takes each value from the first of these that gives it:
 
 1. A flag: `--endpoint`, `--bucket`, `--prefix`, `--region`,
    `--access-key-id`, `--secret-access-key`.
 2. A variable: `OBJECT_STORAGE_ENDPOINT`, `OBJECT_STORAGE_BUCKET`,
    `OBJECT_STORAGE_PREFIX`, `OBJECT_STORAGE_REGION`,
    `OBJECT_STORAGE_ACCESS_KEY_ID`, `OBJECT_STORAGE_SECRET_ACCESS_KEY`.
-3. A TOML file: `--store <file>`, else `/etc/mica/store.toml` when it exists.
-
-A machine with one bucket keeps it in `/etc/mica/store.toml`, and needs no
-flags:
+3. A TOML file: `--store <file>`. See
+   [store.example.toml](../store.example.toml).
 
 ```bash
-sudo cp store.example.toml /etc/mica/store.toml
-sudo chmod 600 /etc/mica/store.toml      # then fill it in
+cp store.example.toml s3.toml && chmod 600 s3.toml     # then fill it in
+sudo mica disk create data --size 500G --store s3.toml
 ```
 
 Do not give the secret key as a flag on a shared machine: other users see
 the flags of a process in `ps`.
 
-Two disks can use two buckets with two sets of credentials. The daemon
-keeps the credentials of an attached disk in its folder,
-`/var/lib/mica/disks/<disk>/store.toml`, root only. A detach deletes them.
+Two disks can use two buckets with two sets of credentials. The newest
+credentials for a bucket replace the old ones.
 
 ## Use a disk
 
 ```bash
-sudo mica disk create data --size 500G      # no space is used until it is written
+sudo mica disk create data --size 500G      # the bucket stores only written data
 sudo mica disk attach data                  # makes /dev/mica/data
 sudo mkfs.ext4 /dev/mica/data               # only for a new disk
 sudo mount -o discard /dev/mica/data /mnt/data
 ```
 
 Mount with `discard`: then the bucket also deletes the data of deleted
-files. To move the disk to another node, unmount it and detach it:
+files. To move the disk to another machine, unmount it and detach it:
 
 ```bash
 sudo umount /mnt/data
-sudo mica disk detach data                  # returns when the bucket has all data
+sudo mica disk detach data                  # shows the upload, and returns when the bucket has all data
 ```
 
-On the other node, `mica disk attach data` and `mount` again.
+On the other machine, `mica disk attach data` and `mount` again.
 
 For a VM, give the device to the VM, and do not mount it on the host:
 
@@ -92,21 +98,22 @@ mica disk.
 
 | Command | What it does |
 |---|---|
-| `mica status` | The disks attached on this node, their unsaved data and cache |
-| `mica disk ls` | The disks in the bucket |
+| `mica status [--watch]` | The disks attached on this machine: read, write, upload and download speed, unsaved data, cache, last save |
+| `mica disk ls` | The disks in each bucket that the machine knows: where each is attached, its local data and cache |
 | `mica disk info <disk>` | One disk, its limits and snapshots |
 | `mica disk create <disk> --size 20G [--chunk-size 1M] [--cache-size 512M] [--unsaved-size 4G] [--interval 5m]` | A new, empty disk |
 | `mica disk attach <disk>` | Makes `/dev/mica/<disk>` |
-| `mica disk detach <disk>` | Uploads all data and gives the disk free |
+| `mica disk detach <disk>` | Uploads all data, with speed and time left, and gives the disk free |
 | `mica disk set <disk> [--size] [--cache-size] [--unsaved-size] [--interval]` | New limits, or a larger size (detached only) |
 | `mica disk restore <disk> <snapshot> <new disk>` | A new disk from a snapshot |
-| `mica disk release <disk>` | Gives free a disk whose node is gone for good. The unsaved data of that node is lost. |
-| `mica disk delete <disk>` | Deletes the disk and its snapshots. Refused while another node has it. |
+| `mica disk release <disk>` | Frees a disk whose machine is gone for good. The unsaved data of that machine is lost. |
+| `mica disk delete <disk>` | Deletes the disk and its snapshots. Refused while a machine has it. |
 | `mica snapshot create / delete <disk> <name>` | Snapshots. A create uploads all changes first. |
 | `mica service install / uninstall / status` | The systemd unit `mica.service` |
 
-`--json` prints the answer of the daemon as JSON. `mica status --json`
-also shows the requests and bytes of each disk since its attach.
+Each command prints the next step as a command to copy. `--json` prints
+the answer of the daemon as JSON instead. `mica status --json` also shows
+the requests and bytes of each disk since its attach.
 
 ### Choose the chunk size
 
@@ -126,7 +133,7 @@ needed once, to set it up:
 
 ```bash
 sudo mica service install
-sudo mica disk create photos --size 1T --chunk-size 4M --cache-size 20G
+sudo mica disk create photos --size 1T --chunk-size 4M --cache-size 20G --store s3.toml
 sudo mica disk attach photos
 sudo mkfs.ext4 /dev/mica/photos
 echo "/dev/mica/photos $HOME/photos ext4 discard,nofail,x-systemd.requires=mica.service 0 0" | sudo tee -a /etc/fstab
@@ -164,7 +171,7 @@ mount with `nofail` does not stop the boot: mount it when the disk is back.
 | `the local data … is of another disk` | A disk with this name was deleted and made again | The old data is kept as orphaned. |
 | `this store cannot hold mica disks` | The bucket refuses conditional writes | Use another bucket or provider. |
 | `Warning: this store ignores conditional writes` | The bucket accepts the conditions but does not keep them | Attach the disk on one node only. |
-| `upload is behind` in `mica status` | Unsaved data missed three transactions | Check the network and the bucket. Writes wait at the unsaved limit. |
+| `upload behind` in `mica status` | Unsaved data missed three transactions | Check the network and the bucket. Writes wait at the unsaved limit. |
 | `stopped: a local sync failed` | The local SSD failed a write | The disk refuses I/O. Check the SSD. |
 | `not served yet, tried again` in the log | At start, the bucket could not be reached | mica tries again every 10 seconds. Check the network. |
 

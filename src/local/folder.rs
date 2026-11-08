@@ -16,7 +16,6 @@ use crate::store::StoreConfig;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 /// The version of the files in a folder. A mica that reads files of
@@ -110,11 +109,7 @@ impl DiskFolder {
 
     /// Keeps the credentials for a restart of mica or of the node.
     pub fn save_store(&self, store: &StoreConfig) -> Result<()> {
-        let path = self.path.join("store.toml");
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true).mode(0o600);
-        std::io::Write::write_all(&mut options.open(&path)?, toml::to_string(store)?.as_bytes())?;
-        Ok(())
+        store.save(&self.path.join("store.toml"))
     }
 
     pub fn saved_store(&self) -> Option<StoreConfig> {

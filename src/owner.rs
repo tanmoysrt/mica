@@ -60,7 +60,7 @@ impl Claim {
             bail!("disk {} is being deleted: run `mica disk delete` to finish", store.disk);
         }
         if let Some(owner) = head.owner.as_ref().filter(|owner| owner.id != node.id) {
-            bail!("disk {} is attached on {}", store.disk, owner.node);
+            bail!("disk {} is attached on {}: detach it there first", store.disk, owner.node);
         }
         let mut new = head.clone();
         // A crash before a head write leaves objects in the folder `next`.
@@ -82,7 +82,7 @@ impl Claim {
         let current = store.require_head().await?;
         let Some(owner) = current.head.owner.clone() else { bail!("disk {} is not attached", store.disk) };
         if owner.id == node.id {
-            bail!("disk {} is attached on this node: detach it", store.disk);
+            bail!("disk {0} is attached on this machine: detach it with `sudo mica disk detach {0}`", store.disk);
         }
         let mut head = current.head.clone();
         head.owner = None;

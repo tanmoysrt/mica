@@ -1,8 +1,9 @@
 //! The mica daemon: one for each node.
 //!
 //! The daemon serves the disks that are attached on the node. The CLI and
-//! any controller talk to it on a Unix socket (see `api.rs`). Each request
-//! that needs the store carries the credentials of the bucket.
+//! any controller talk to it on a Unix socket (see `api.rs`). A request
+//! names a disk, and can carry the credentials of its bucket. Without
+//! them, the daemon finds the disk in the buckets that it knows.
 //!
 //! Attach: claim the disk, open its local data, make the ublk device, and
 //! start the background work: transactions, write-back and downloads.
@@ -20,11 +21,13 @@
 //! transactions, so the next daemon must wait for its exit.
 
 pub mod api;
+mod buckets;
+mod meter;
 mod operations;
 
 use crate::config::Config;
 use crate::disk::{Disk, TransactionKind};
-use crate::local::{DiskFolder, LocalState, NodeCache};
+use crate::local::{DiskFolder, KnownBuckets, LocalState, NodeCache};
 use crate::owner::{Claim, NodeId};
 use crate::store::{Bucket, DiskStore, StoreConfig, validate_name};
 use crate::transfers::Transfers;
@@ -41,12 +44,14 @@ use tokio::sync::Mutex;
 const DETACH_RETRY: Duration = Duration::from_secs(10);
 const RECOVER_RETRY: Duration = Duration::from_secs(10);
 const LAST_TRANSACTION_LIMIT: Duration = Duration::from_secs(60);
+const METER_INTERVAL: Duration = Duration::from_secs(1);
 
 pub struct Daemon {
     config: Config,
     node: NodeId,
     cache: Arc<NodeCache>,
     transfers: Arc<Transfers>,
+    buckets: KnownBuckets,
     disks: Mutex<HashMap<String, Attached>>,
     /// One attach or detach of each disk at a time.
     locks: std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>,
@@ -59,6 +64,7 @@ struct Attached {
     /// `None` while the disk detaches.
     device: Option<UblkDevice>,
     link: String,
+    meter: meter::Meter,
 }
 
 impl Daemon {
@@ -68,6 +74,7 @@ impl Daemon {
             node: NodeId::load(&config.data_dir)?,
             cache: NodeCache::load(config.data_dir.join("cache"))?,
             transfers: Transfers::new(),
+            buckets: KnownBuckets::new(&config.data_dir),
             config,
             disks: Mutex::default(),
             locks: Default::default(),
@@ -75,12 +82,13 @@ impl Daemon {
         });
         log::info!("node {} ({})", daemon.node.hostname, daemon.node.id);
         daemon.recover().await;
+        tokio::spawn(daemon.clone().run_meters());
         Ok(daemon)
     }
 
     /// Attaches a disk on this node, and returns its device. A disk that is
     /// attached here already gives its device again.
-    pub async fn attach(&self, store: &StoreConfig, name: &str) -> Result<Value> {
+    pub async fn attach(&self, store: Option<&StoreConfig>, name: &str) -> Result<Value> {
         validate_name(name)?;
         let lock = self.lock(name);
         let _one_at_a_time = lock.lock().await;
@@ -94,14 +102,15 @@ impl Daemon {
         if folder.exists() && folder.state()? == LocalState::Orphaned {
             bail!("disk {name} has orphaned local data in {}: copy it out, then delete the folder", folder.path.display());
         }
-        let store_handle = DiskStore::new(Arc::new(Bucket::connect(store)?), name);
-        let mut claim = Claim::take(store_handle, &self.node).await?;
+        let store = self.locate(store, name).await?;
+        let config = store.bucket.config.clone();
+        let mut claim = Claim::take(store, &self.node).await?;
         if let Err(error) = check_folder(&folder, &claim) {
             let _ = claim.release().await;
             return Err(error);
         }
         folder.create(&claim.head().id)?;
-        folder.save_store(store)?;
+        folder.save_store(&config)?;
         let disk = self.open(claim, &folder).await?;
         let profile = disk.claim().await.head().profile.clone();
         let device = match self.start_device(&disk, &folder, None).await {
@@ -124,9 +133,9 @@ impl Daemon {
         let _one_at_a_time = lock.lock().await;
         let (disk, device) = {
             let mut disks = self.disks.lock().await;
-            let Some(attached) = disks.get_mut(name) else { bail!("disk {name} is not attached on this node") };
+            let Some(attached) = disks.get_mut(name) else { bail!("disk {name} is not attached on this machine") };
             if attached.device.as_ref().is_some_and(|device| device::in_use(&device.path)) {
-                bail!("disk {name} is in use: unmount it, or stop the program that uses it");
+                bail!("disk {name} is in use: unmount it first, such as with `sudo umount /dev/mica/{name}`");
             }
             (attached.disk.clone(), attached.device.take())
         };
@@ -200,6 +209,7 @@ impl Daemon {
             log::error!("disk {}: the folder has no credentials: attach the disk again", folder.disk);
             return remove_paused(paused).await;
         };
+        let _ = self.buckets.remember(&store);
         let store = DiskStore::new(Arc::new(Bucket::connect(&store)?), &folder.disk);
         if let Some(reason) = lost(&store, &self.node).await? {
             folder.set_state(LocalState::Orphaned)?;
@@ -239,14 +249,19 @@ impl Daemon {
 
     pub async fn status(&self) -> Value {
         let disks = self.disks.lock().await;
-        let mut list: Vec<Value> = disks
-            .iter()
-            .map(|(name, attached)| {
-                json!({ "disk": name, "device": attached.link, "detaching": attached.device.is_none(), "status": attached.disk.status() })
-            })
-            .collect();
+        let mut list: Vec<Value> = disks.iter().map(|(name, attached)| attached.describe(name)).collect();
         list.sort_by(|a, b| a["disk"].as_str().cmp(&b["disk"].as_str()));
-        json!({ "node": self.node.hostname, "disks": list })
+        json!({ "node": self.node.hostname, "version": env!("CARGO_PKG_VERSION"), "disks": list })
+    }
+
+    async fn run_meters(self: Arc<Self>) {
+        loop {
+            tokio::time::sleep(METER_INTERVAL).await;
+            for attached in self.disks.lock().await.values_mut() {
+                let device = attached.device.as_ref().and_then(|device| device.path.strip_prefix("/dev/"));
+                attached.meter.sample(device, &attached.disk.store.bucket);
+            }
+        }
     }
 
     async fn open(&self, claim: Claim, folder: &DiskFolder) -> Result<Arc<Disk>> {
@@ -273,7 +288,8 @@ impl Daemon {
         tokio::spawn(disk.clone().run_prefetch(profile));
         log::info!("disk {}: attached as {}", disk.name, device.path);
         let name = disk.name.clone();
-        self.disks.lock().await.insert(name, Attached { disk, device: Some(device), link: link.clone() });
+        let attached = Attached { disk, device: Some(device), link: link.clone(), meter: meter::Meter::default() };
+        self.disks.lock().await.insert(name, attached);
         Ok(link)
     }
 
@@ -290,8 +306,19 @@ impl Daemon {
     }
 }
 
-/// Local data of another disk with the same name: from another bucket, or
-/// from a deleted disk. It is kept as orphaned, and never used.
+impl Attached {
+    fn describe(&self, name: &str) -> Value {
+        json!({
+            "disk": name,
+            "device": self.link,
+            "bucket": self.disk.store.bucket.config.place(),
+            "detaching": self.device.is_none(),
+            "status": self.disk.status(),
+            "rates": self.meter.rates(),
+        })
+    }
+}
+
 /// Why the bucket says that this node does not hold the disk any more.
 /// The node gives a disk free only at detach, which deletes the folder.
 async fn lost(store: &DiskStore, node: &NodeId) -> Result<Option<String>> {
@@ -302,7 +329,7 @@ async fn lost(store: &DiskStore, node: &NodeId) -> Result<Option<String>> {
     Ok(match current.head.owner {
         Some(owner) if owner.id == node.id => None,
         Some(owner) => Some(format!("{} took the disk", owner.node)),
-        None => Some("another node took the disk and gave it free".into()),
+        None => Some("another machine took the disk and gave it free".into()),
     })
 }
 
@@ -313,6 +340,8 @@ async fn remove_paused(paused: Option<i32>) -> Result<()> {
     Ok(())
 }
 
+/// Local data of another disk with the same name: from another bucket, or
+/// from a deleted disk. It is kept as orphaned, and never used.
 fn check_folder(folder: &DiskFolder, claim: &Claim) -> Result<()> {
     if folder.exists() && folder.disk_id()? != claim.head().id {
         folder.set_state(LocalState::Orphaned)?;

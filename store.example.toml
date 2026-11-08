@@ -1,5 +1,5 @@
-# The bucket of a disk. mica reads /etc/mica/store.toml, or the file of
-# `--store <file>`. A flag such as --bucket, or a variable such as
+# The bucket of a disk, for `--store <file>`. mica needs it once: the daemon
+# keeps a bucket that works. A flag such as --bucket, or a variable such as
 # OBJECT_STORAGE_BUCKET, overrides the value of the file.
 # Keep the file private: chmod 600.
 

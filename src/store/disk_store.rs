@@ -78,7 +78,7 @@ impl DiskStore {
     }
 
     pub async fn require_head(&self) -> Result<Versioned> {
-        self.head().await?.ok_or_else(|| anyhow!("disk {} does not exist", self.disk))
+        self.head().await?.ok_or_else(|| anyhow!("there is no disk {} (see `sudo mica disk ls`)", self.disk))
     }
 
     /// Makes the head of a new disk. Fails if the disk exists. The read

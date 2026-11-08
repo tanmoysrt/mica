@@ -98,6 +98,8 @@ pub struct Status {
     pub size: u64,
     pub chunk_size: u64,
     pub transaction: u64,
+    /// When the last transaction ended, in Unix seconds. 0 for none.
+    pub saved_time: u64,
     pub unsaved_bytes: u64,
     pub local_bytes: u64,
     pub cache_bytes: u64,
@@ -215,16 +217,23 @@ impl Disk {
     }
 
     pub fn status(&self) -> Status {
+        // Each lock alone: a guard in the struct expression would live to its end.
+        let saved_time = self.root.lock().unwrap().time;
+        let unsaved_bytes = self.unsaved.lock().unwrap().len() as u64 * self.chunk_size;
+        let local_bytes = self.local.lock().unwrap().len() as u64 * self.chunk_size;
+        let limits = *self.limits.lock().unwrap();
+        let stopped = self.stopped.lock().unwrap().clone();
         Status {
             size: self.size,
             chunk_size: self.chunk_size,
             transaction: self.version.load(Ordering::SeqCst),
-            unsaved_bytes: self.unsaved.lock().unwrap().len() as u64 * self.chunk_size,
-            local_bytes: self.local.lock().unwrap().len() as u64 * self.chunk_size,
+            saved_time,
+            unsaved_bytes,
+            local_bytes,
             cache_bytes: self.cache.usage().bytes,
-            limits: *self.limits.lock().unwrap(),
+            limits,
             behind: self.is_behind(),
-            stopped: self.stopped.lock().unwrap().clone(),
+            stopped,
             requests: serde_json::to_value(&self.store.bucket.counts).unwrap_or_default(),
             io: serde_json::to_value(&self.stats).unwrap_or_default(),
         }

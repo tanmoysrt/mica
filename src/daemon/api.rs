@@ -6,7 +6,7 @@
 //! ```
 //!
 //! The socket belongs to root, with mode 0600, because a request can make
-//! devices and carries bucket credentials.
+//! devices and carry bucket credentials.
 
 use super::Daemon;
 pub use super::operations::LimitsRequest;
@@ -20,21 +20,31 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
+/// A command, and the bucket of its disk. Without a bucket, the daemon
+/// finds the disk in the buckets that it knows. A bucket that works is kept.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Request {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store: Option<StoreConfig>,
+    #[serde(flatten)]
+    pub command: Command,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "kebab-case")]
-pub enum Request {
+pub enum Command {
     Status,
-    List { store: StoreConfig },
-    Info { store: StoreConfig, disk: String },
-    Create { store: StoreConfig, disk: String, size: u64, chunk_size: Option<u64>, limits: LimitsRequest },
-    Attach { store: StoreConfig, disk: String },
+    List,
+    Info { disk: String },
+    Create { disk: String, size: u64, chunk_size: Option<u64>, limits: LimitsRequest },
+    Attach { disk: String },
     Detach { disk: String },
-    Set { store: StoreConfig, disk: String, size: Option<u64>, limits: LimitsRequest },
-    Release { store: StoreConfig, disk: String },
-    Delete { store: StoreConfig, disk: String },
-    SnapshotCreate { store: StoreConfig, disk: String, snapshot: String },
-    SnapshotDelete { store: StoreConfig, disk: String, snapshot: String },
-    Restore { store: StoreConfig, disk: String, snapshot: String, target: String },
+    Set { disk: String, size: Option<u64>, limits: LimitsRequest },
+    Release { disk: String },
+    Delete { disk: String },
+    SnapshotCreate { disk: String, snapshot: String },
+    SnapshotDelete { disk: String, snapshot: String },
+    Restore { disk: String, snapshot: String, target: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -78,20 +88,27 @@ async fn answer(daemon: Arc<Daemon>, stream: UnixStream) {
 }
 
 async fn run(daemon: &Arc<Daemon>, request: Request) -> Result<Value> {
-    match request {
-        Request::Status => Ok(daemon.status().await),
-        Request::List { store } => daemon.list(&store).await,
-        Request::Info { store, disk } => daemon.info(&store, &disk).await,
-        Request::Create { store, disk, size, chunk_size, limits } => daemon.create(&store, &disk, size, chunk_size, limits).await,
-        Request::Attach { store, disk } => daemon.attach(&store, &disk).await,
-        Request::Detach { disk } => daemon.detach(&disk).await,
-        Request::Set { store, disk, size, limits } => daemon.set(&store, &disk, size, limits).await,
-        Request::Release { store, disk } => daemon.release(&store, &disk).await,
-        Request::Delete { store, disk } => daemon.delete(&store, &disk).await,
-        Request::SnapshotCreate { store, disk, snapshot } => daemon.create_snapshot(&store, &disk, &snapshot).await,
-        Request::SnapshotDelete { store, disk, snapshot } => daemon.delete_snapshot(&store, &disk, &snapshot).await,
-        Request::Restore { store, disk, snapshot, target } => daemon.restore(&store, &disk, &snapshot, &target).await,
+    let store = request.store.as_ref();
+    let result = match request.command {
+        Command::Status => Ok(daemon.status().await),
+        Command::List => daemon.list(store).await,
+        Command::Info { disk } => daemon.info(store, &disk).await,
+        Command::Create { disk, size, chunk_size, limits } => daemon.create(store, &disk, size, chunk_size, limits).await,
+        Command::Attach { disk } => daemon.attach(store, &disk).await,
+        Command::Detach { disk } => daemon.detach(&disk).await,
+        Command::Set { disk, size, limits } => daemon.set(store, &disk, size, limits).await,
+        Command::Release { disk } => daemon.release(store, &disk).await,
+        Command::Delete { disk } => daemon.delete(store, &disk).await,
+        Command::SnapshotCreate { disk, snapshot } => daemon.create_snapshot(store, &disk, &snapshot).await,
+        Command::SnapshotDelete { disk, snapshot } => daemon.delete_snapshot(store, &disk, &snapshot).await,
+        Command::Restore { disk, snapshot, target } => daemon.restore(store, &disk, &snapshot, &target).await,
+    };
+    if let (Ok(_), Some(store)) = (&result, store)
+        && let Err(error) = daemon.buckets.remember(store)
+    {
+        log::warn!("cannot keep the bucket {}: {error:#}", store.place());
     }
+    result
 }
 
 /// Sends one request to the daemon and returns its result.

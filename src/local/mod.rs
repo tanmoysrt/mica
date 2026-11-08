@@ -3,11 +3,13 @@
 //! Each attached disk has a folder with its data files and its dirty log.
 //! The node has one chunk cache, with a folder and a budget for each disk.
 
+pub mod buckets;
 pub mod cache;
 pub mod data_files;
 pub mod dirty_log;
 pub mod folder;
 
+pub use buckets::KnownBuckets;
 pub use cache::{ChunkCache, NodeCache};
 pub use data_files::DataFiles;
 pub use dirty_log::DirtyLog;

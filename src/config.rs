@@ -85,8 +85,9 @@ pub fn format_duration(seconds: u64) -> String {
     }
 }
 
+/// A size in the units of `parse_size`, such as 512M or 1.5G. One decimal below 10 only.
 pub fn format_size(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    const UNITS: [&str; 5] = ["", "K", "M", "G", "T"];
     let mut value = bytes as f64;
     let mut unit = 0;
     while value >= 1024.0 && unit < UNITS.len() - 1 {
@@ -94,8 +95,8 @@ pub fn format_size(bytes: u64) -> String {
         unit += 1;
     }
     match unit {
-        0 => format!("{bytes}B"),
-        _ if value.fract() == 0.0 => format!("{value:.0}{}", UNITS[unit]),
+        0 => bytes.to_string(),
+        _ if value.fract() == 0.0 || value >= 10.0 => format!("{value:.0}{}", UNITS[unit]),
         _ => format!("{value:.1}{}", UNITS[unit]),
     }
 }
@@ -110,7 +111,8 @@ mod tests {
         assert_eq!(parse_size("20GiB").unwrap(), 20 << 30);
         assert_eq!(parse_size("4096").unwrap(), 4096);
         assert!(parse_size("1X").is_err());
-        assert_eq!(format_size(3 << 29), "1.5GiB");
+        assert_eq!(format_size(3 << 29), "1.5G");
+        assert_eq!(parse_size(&format_size(512 << 20)).unwrap(), 512 << 20);
         assert_eq!(parse_duration("5m").unwrap(), 300);
         assert_eq!(parse_duration("90").unwrap(), 90);
         assert!(parse_duration("5d").is_err());

@@ -94,6 +94,11 @@ impl NodeCache {
         ChunkCache { node: self.clone(), disk: disk.to_string() }
     }
 
+    /// The bytes in the cache of a disk, attached or not.
+    pub fn bytes(&self, disk: &str) -> u64 {
+        self.state().disks.get(disk).map_or(0, |index| index.bytes)
+    }
+
     /// Deletes the cache of a deleted disk.
     pub fn remove_disk(&self, disk: &str) {
         let mut state = self.state();

@@ -304,12 +304,14 @@ intervals.
 
 ## Credentials
 
-Each request that needs the bucket carries its credentials. The CLI takes
-each value from a flag, else from an `OBJECT_STORAGE_*` variable, else from
-the file of `--store` or `/etc/mica/store.toml`. The daemon keeps the
-credentials of an attached disk in memory and in
-`/var/lib/mica/disks/<disk>/store.toml`, mode 0600. So it serves the disk
-again after a restart or a reboot. A detach deletes them with the folder.
+A request can carry the credentials of a bucket. The CLI takes each value
+from a flag, else from an `OBJECT_STORAGE_*` variable, else from the file
+of `--store`. The daemon keeps each bucket that a request gave and that
+worked, in `/var/lib/mica/buckets/`, mode 0600. A request without a bucket
+names only a disk, and the daemon finds the disk in the buckets that it
+knows. The daemon also keeps the credentials of an attached disk in
+`/var/lib/mica/disks/<disk>/store.toml`, so it serves the disk again after
+a restart or a reboot. A detach deletes that copy with the folder.
 
 ## The code
 
@@ -325,8 +327,9 @@ again after a restart or a reboot. A detach deletes them with the folder.
 | `local/dirty_log.rs` | The dirty log and the recent bitmap |
 | `local/cache.rs` | The chunk cache of the node |
 | `local/folder.rs` | The local folder of a disk and its state |
+| `local/buckets.rs` | The buckets that the node knows |
 | `transfers.rs` | The download and upload slots of the node |
 | `disk/` | The engine of an attached disk: I/O, transactions, prefetch |
 | `ublk/` | The block device, its queue threads, and the zero-copy requests |
-| `daemon/` | The daemon, its operations, and its API |
+| `daemon/` | The daemon, its operations, its API, the bucket of a request, and the throughput of each disk |
 | `cli/` | The `mica` command and the systemd unit |

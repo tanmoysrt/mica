@@ -1,10 +1,10 @@
-# The node settings of mica. Copy to /etc/mica/config.toml.
+# The machine settings of mica. Copy to /etc/mica/config.toml.
 # Each setting is optional. The values here are the defaults.
 # The settings of a disk are given at `mica disk create`, and its bucket
-# with --store: see store.example.toml.
+# once with --store: see store.example.toml.
 
 socket = "/run/mica.sock"
-# Data files, dirty logs and the chunk cache. Use a local SSD.
+# Data files, dirty logs, the chunk cache and the known buckets. Use a local SSD.
 data_dir = "/var/lib/mica"
-# Files that a reboot must remove: bucket credentials and recent bitmaps.
+# Files that a reboot must remove: recent bitmaps.
 run_dir = "/run/mica"

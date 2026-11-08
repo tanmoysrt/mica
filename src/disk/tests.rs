@@ -107,6 +107,19 @@ async fn writes_survive_a_detach_and_garbage_goes_at_once() {
 }
 
 #[tokio::test]
+async fn the_status_of_a_disk_with_unsaved_data_returns() {
+    let rig = Rig::new();
+    rig.create("web").await;
+    let disk = rig.attach("web").await;
+    disk.write(0, pattern(1, 4096)).await.unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let copy = disk.clone();
+    std::thread::spawn(move || sender.send(copy.status().unsaved_bytes));
+    assert_eq!(receiver.recv_timeout(std::time::Duration::from_secs(5)).expect("status deadlocks"), CHUNK);
+    rig.detach(disk).await;
+}
+
+#[tokio::test]
 async fn snapshots_keep_their_objects_until_the_merge() {
     let rig = Rig::new();
     rig.create("db").await;
