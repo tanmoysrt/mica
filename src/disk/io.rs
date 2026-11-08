@@ -16,7 +16,6 @@ use crate::store::{Entry, Hash};
 use crate::transfers::Priority;
 use anyhow::{Result, anyhow};
 use futures::{StreamExt, TryStreamExt};
-use std::collections::BTreeSet;
 use std::fs::File;
 use std::os::unix::fs::FileExt;
 use std::sync::Arc;
@@ -95,28 +94,22 @@ impl Disk {
     }
 
     pub async fn write(&self, offset: u64, data: Vec<u8>) -> Result<()> {
-        self.write_parts(offset, data).await.map(drop)
-    }
-
-    /// A write with forced unit access: durable when it returns. It takes
-    /// the one-at-a-time path of a flush, for its own chunks only.
-    pub async fn write_durable(&self, offset: u64, data: Vec<u8>) -> Result<()> {
-        let chunks = self.write_parts(offset, data).await?;
-        self.sync(Some(&chunks)).await
-    }
-
-    async fn write_parts(&self, offset: u64, data: Vec<u8>) -> Result<BTreeSet<usize>> {
         self.ensure_usable()?;
         self.wait_for_room().await?;
         let data = Arc::new(data);
-        let mut chunks = BTreeSet::new();
         for part in self.split(offset, data.len())? {
-            chunks.insert(part.index);
             let slot = self.make_local(part.index, part.buffer.len() as u64 == self.chunk_size).await?;
             self.write_into(slot, part, data.clone()).await?;
         }
         self.note_unsaved_write();
-        Ok(chunks)
+        Ok(())
+    }
+
+    /// A write with forced unit access: durable when it returns. The flush
+    /// after it can share one sync with the flushes of other writers.
+    pub async fn write_durable(&self, offset: u64, data: Vec<u8>) -> Result<()> {
+        self.write(offset, data).await?;
+        self.flush().await
     }
 
     /// A discard of a full chunk makes it zeros. The next transaction
@@ -154,29 +147,26 @@ impl Disk {
         Ok(())
     }
 
-    pub async fn flush(&self) -> Result<()> {
-        self.sync(None).await
-    }
-
-    /// Syncs the data files, then logs the new local chunks. Flushes run
+    /// Syncs the data file, then logs the new local chunks. Flushes run
     /// one at a time: Linux reports a write-back error only once for each
     /// file, so two syncs at the same time could each miss an error. A
-    /// flush that finds all earlier writes durable returns at once.
-    async fn sync(&self, only: Option<&BTreeSet<usize>>) -> Result<()> {
+    /// flush that finds all earlier writes durable returns at once: so the
+    /// writers that wait for one sync share the next.
+    pub async fn flush(&self) -> Result<()> {
         self.ensure_usable()?;
         let target = self.writes_done.load(Ordering::SeqCst);
         let started = Instant::now();
         let _one_at_a_time = self.flushing.lock().await;
         self.ensure_usable()?;
-        if only.is_none() && self.writes_synced.load(Ordering::SeqCst) >= target {
+        if self.writes_synced.load(Ordering::SeqCst) >= target {
             return Ok(());
         }
         let upto = self.writes_done.load(Ordering::SeqCst);
         // Taken before the syncs: each chunk in it wrote its data before it was listed.
-        let unlogged = self.log.take_unlogged(only);
+        let unlogged = self.log.take_unlogged();
         // A write marks the file before the log learns of its chunk, so the
         // file holds the data of each chunk in `unlogged`.
-        let unsynced = only.is_some() || self.unsynced.swap(false, Ordering::SeqCst);
+        let unsynced = self.unsynced.swap(false, Ordering::SeqCst);
         let (file, synced) = (self.data.file().clone(), Instant::now());
         let mut result = match unsynced {
             true => spawn_blocking(move || file.sync_data()).await?.map_err(anyhow::Error::from),
@@ -190,8 +180,7 @@ impl Disk {
             IoStats::add(&self.stats.log_append_micros, appended);
         }
         match &result {
-            Ok(()) if only.is_none() => drop(self.writes_synced.fetch_max(upto, Ordering::SeqCst)),
-            Ok(()) => {}
+            Ok(()) => drop(self.writes_synced.fetch_max(upto, Ordering::SeqCst)),
             // Linux may have dropped the pages that failed, so a later sync
             // that works proves nothing. The disk stops for good.
             Err(error) => {

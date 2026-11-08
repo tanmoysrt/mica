@@ -105,16 +105,9 @@ impl DirtyLog {
 
     /// The chunks that a flush must log: all, or only those in `only`.
     /// They count as listed until `append` or `give_back`.
-    pub fn take_unlogged(&self, only: Option<&BTreeSet<usize>>) -> BTreeSet<usize> {
+    pub fn take_unlogged(&self) -> BTreeSet<usize> {
         let mut state = self.state.lock().unwrap();
-        let taken = match only {
-            None => std::mem::take(&mut state.unlogged),
-            Some(only) => {
-                let taken: BTreeSet<usize> = state.unlogged.intersection(only).copied().collect();
-                state.unlogged.retain(|index| !taken.contains(index));
-                taken
-            }
-        };
+        let taken = std::mem::take(&mut state.unlogged);
         state.logging.extend(&taken);
         taken
     }
