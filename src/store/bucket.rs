@@ -132,8 +132,11 @@ impl Bucket {
     /// conditions would let two nodes write one disk, so it is refused.
     pub async fn check_conditional_writes(&self) -> Result<()> {
         let key = format!("probe-{}", crate::store::head::random_id());
+        // A plain write first, so that a login or network error shows as itself.
+        let Written::Done(tag) = self.put_with(&key, "1".into(), PutMode::Overwrite).await.context("write a probe object")? else {
+            bail!("write a probe object: the store refused it")
+        };
         let result = async {
-            let Written::Done(tag) = self.put_new(&key, "1").await? else { bail!("the probe exists already") };
             ensure!(matches!(self.put_new(&key, "2").await?, Written::Conflict), "the store ignores If-None-Match");
             ensure!(matches!(self.put_if_match(&key, "3", "\"wrong\"").await?, Written::Conflict), "the store ignores If-Match");
             ensure!(matches!(self.put_if_match(&key, "4", &tag).await?, Written::Done(_)), "the store refuses a correct If-Match");
