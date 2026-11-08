@@ -70,6 +70,9 @@ pub struct Bucket {
     store: Arc<dyn ObjectStore>,
     prefix: String,
     pub counts: Counts,
+    /// A test store that writes over conditions, as Garage does.
+    #[cfg(test)]
+    ignores_conditions: bool,
 }
 
 #[derive(Default, Serialize, Debug)]
@@ -106,8 +109,19 @@ impl Bucket {
         Self::over(Arc::new(object_store::memory::InMemory::new()), "test")
     }
 
+    #[cfg(test)]
+    pub fn in_memory_without_conditions() -> Self {
+        Self { ignores_conditions: true, ..Self::in_memory() }
+    }
+
     fn over(store: Arc<dyn ObjectStore>, prefix: &str) -> Self {
-        Self { store, prefix: prefix.trim_matches('/').to_string(), counts: Counts::default() }
+        Self {
+            store,
+            prefix: prefix.trim_matches('/').to_string(),
+            counts: Counts::default(),
+            #[cfg(test)]
+            ignores_conditions: false,
+        }
     }
 
     pub async fn get(&self, key: &str) -> Result<Option<Bytes>> {
@@ -165,6 +179,8 @@ impl Bucket {
     async fn put_with(&self, key: &str, data: Bytes, mode: PutMode) -> Result<Written> {
         add(&self.counts.put, 1);
         add(&self.counts.bytes_out, data.len() as u64);
+        #[cfg(test)]
+        let mode = if self.ignores_conditions { PutMode::Overwrite } else { mode };
         let options = PutOptions { mode, ..PutOptions::default() };
         match self.store.put_opts(&self.path(key), PutPayload::from(data), options).await {
             Ok(result) => Ok(Written::Done(result.e_tag.unwrap_or_default())),

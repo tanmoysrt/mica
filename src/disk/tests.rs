@@ -323,3 +323,22 @@ async fn a_store_with_conditional_writes_passes_the_probe() {
     bucket.check_conditional_writes().await.unwrap();
     assert!(bucket.list("").await.unwrap().is_empty(), "the probe stays in the store");
 }
+
+#[tokio::test]
+async fn a_store_without_conditions_keeps_an_existing_disk() {
+    let store = DiskStore::new(Arc::new(Bucket::in_memory_without_conditions()), "a");
+    let limits = Limits { cache_bytes: 4 * CHUNK, unsaved_bytes: 1024 * CHUNK, interval_seconds: 1 };
+    store.create_head(&Head::new(SIZE, CHUNK, limits, None)).await.unwrap();
+    assert!(store.create_head(&Head::new(SIZE, CHUNK, limits, None)).await.is_err());
+}
+
+#[tokio::test]
+async fn a_store_without_conditions_refuses_a_head_write_after_a_change() {
+    let store = DiskStore::new(Arc::new(Bucket::in_memory_without_conditions()), "a");
+    let limits = Limits { cache_bytes: 4 * CHUNK, unsaved_bytes: 1024 * CHUNK, interval_seconds: 1 };
+    let first = store.create_head(&Head::new(SIZE, CHUNK, limits, None)).await.unwrap();
+    let mut changed = first.head.clone();
+    changed.next += 1;
+    store.replace_head(&first, changed.clone()).await.unwrap();
+    assert!(store.replace_head(&first, changed).await.is_err(), "a stale head must not win");
+}

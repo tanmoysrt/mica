@@ -81,8 +81,12 @@ impl DiskStore {
         self.head().await?.ok_or_else(|| anyhow!("disk {} does not exist", self.disk))
     }
 
-    /// Makes the head of a new disk. Fails if the disk exists.
+    /// Makes the head of a new disk. Fails if the disk exists. The read
+    /// first also protects a disk on a store that ignores `If-None-Match`.
     pub async fn create_head(&self, head: &Head) -> Result<Versioned> {
+        if self.head().await?.is_some() {
+            bail!("disk {} exists already", self.disk);
+        }
         match self.bucket.put_new(&self.head_key(), serde_json::to_vec(head)?).await? {
             Written::Done(tag) => Ok(Versioned { head: head.clone(), tag }),
             Written::Conflict => bail!("disk {} exists already", self.disk),
@@ -90,8 +94,12 @@ impl DiskStore {
     }
 
     /// Replaces the head if nobody changed it since `current` was read.
-    /// The error is `HeadConflict` when somebody did.
+    /// The error is `HeadConflict` when somebody did. The read first finds
+    /// most conflicts also on a store that ignores `If-Match`.
     pub async fn replace_head(&self, current: &Versioned, head: Head) -> Result<Versioned> {
+        if self.head().await?.is_none_or(|now| now.tag != current.tag) {
+            return Err(HeadConflict.into());
+        }
         match self.bucket.put_if_match(&self.head_key(), serde_json::to_vec(&head)?, &current.tag).await? {
             Written::Done(tag) => Ok(Versioned { head, tag }),
             Written::Conflict => Err(HeadConflict.into()),
