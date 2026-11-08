@@ -67,7 +67,6 @@ impl Config {
             transaction_interval: Duration::from_secs(self.transaction_interval_seconds.max(1)),
             transaction_after: parse_size(&self.transaction_after).unwrap_or(512 << 20),
             max_unsaved_age: Duration::from_secs(self.max_unsaved_minutes * 60),
-            keep_saved_local: 64 << 20,
         }
     }
 }

@@ -167,10 +167,12 @@ transaction uploads it again.
 
 ### Saved chunks leave the data file
 
-After a transaction, saved chunks stay local. When more than 64 MiB of
-saved chunks are local, the oldest ones move into the cache, and their
-range in the data file becomes a hole again. Thus the data file holds the
-unsaved data and the newest saved data, and the cache holds the rest.
+After a transaction, saved chunks stay local. A next write into them needs
+no copy, and on ext4 or XFS it overwrites blocks that exist, so a flush
+syncs less. When the saved local chunks are more than the cache budget of
+the disk, the oldest ones move into the cache, and their range in the data
+file becomes a hole again. Thus the data file holds the unsaved data and
+the newest saved data, and the cache holds the rest.
 
 ## A read
 
@@ -285,6 +287,9 @@ Each disk has two budgets in its head, so they follow the disk:
 
 - `cache_bytes`: clean chunks kept on the node.
 - `unsaved_bytes`: data not in the bucket yet. Guest writes wait at this limit.
+
+The cache budget also limits the saved chunks in the data file. So a disk
+uses at most `unsaved_bytes + 2 × cache_bytes` of the local SSD.
 
 `mica disk set-limits` changes them. A disk is **behind** when its oldest
 unsaved write is older than five minutes.

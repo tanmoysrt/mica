@@ -340,11 +340,13 @@ impl Disk {
         self.clean(index, base, priority).await.map(drop)
     }
 
-    /// Saved chunks over `Tuning::keep_saved_local` leave the data files, oldest
-    /// first, and go into the cache. The dirty log drops them before their
-    /// space is freed: a crash must not bring back a chunk that is a hole.
+    /// Saved chunks over the cache budget leave the data file, oldest first,
+    /// and go into the cache. Until then they stay: a write into a local
+    /// chunk needs no copy, and on ext4 or XFS it overwrites blocks that
+    /// exist, so a flush syncs less. The dirty log drops each chunk before
+    /// its space is freed: a crash must not bring back a chunk that is a hole.
     pub(super) async fn free_saved(&self) -> Result<()> {
-        let keep = (self.tuning.keep_saved_local / self.chunk_size) as usize;
+        let keep = (self.cache.usage().limit / self.chunk_size) as usize;
         let mut freed = std::mem::take(&mut *self.unpunched.lock().unwrap());
         loop {
             let next = {

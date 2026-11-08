@@ -34,7 +34,7 @@ impl Rig {
     }
 
     async fn create(&self, name: &str) {
-        let limits = Limits { cache_bytes: 64 * CHUNK, unsaved_bytes: 1024 * CHUNK };
+        let limits = Limits { cache_bytes: 4 * CHUNK, unsaved_bytes: 1024 * CHUNK };
         let mut claim = Claim::create(self.store(name), &self.node, Head::new(SIZE, CHUNK, limits, None)).await.unwrap();
         claim.release().await.unwrap();
     }
@@ -47,7 +47,6 @@ impl Rig {
             transaction_interval: Duration::from_millis(20),
             transaction_after: 8 * CHUNK,
             max_unsaved_age: Duration::from_secs(300),
-            keep_saved_local: 4 * CHUNK,
         };
         let cache = self.cache.for_disk(name, 64 * CHUNK);
         Disk::open(claim, &folder, cache, Transfers::new(), tuning).await.unwrap()

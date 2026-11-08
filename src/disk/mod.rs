@@ -50,8 +50,6 @@ pub struct Tuning {
     pub transaction_after: u64,
     /// A disk is behind when its oldest unsaved write is older than this.
     pub max_unsaved_age: Duration,
-    /// Saved chunks over this size leave the data files for the cache.
-    pub keep_saved_local: u64,
 }
 
 pub struct Disk {
