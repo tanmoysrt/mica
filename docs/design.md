@@ -6,9 +6,9 @@ This document explains the design from the start. Each section uses only the wor
 
 ## The parts
 
-- **Node.** A Linux machine that runs mica. It has a local SSD.
+- **Machine.** A Linux machine that runs mica. It has a local SSD.
 - **Bucket.** An S3 bucket. It holds the data of the disks. Each disk can use its own bucket, with its own credentials.
-- **Daemon.** One `mica daemon` on each node, run by systemd as root. It serves the attached disks.
+- **Daemon.** One `mica daemon` on each machine, run by systemd as root. It serves the attached disks.
 - **Device.** For each attached disk, the daemon makes a ublk block device, `/dev/ublkbN`, with the link `/dev/mica/<disk>`. ublk is a Linux driver that sends the block requests of a device to a program.
 - **CLI.** The `mica` command. It sends each request to the daemon on a Unix socket, `/run/mica.sock`. Only root can use the socket.
 
@@ -28,10 +28,10 @@ This document explains the design from the start. Each section uses only the wor
 - **Transaction.** One upload of changed chunks, pages and a root. Each transaction makes a new version. Transactions have numbers: 1, 2, 3 and so on.
 - **Head.** One small object that names the current version, the owner and the snapshots. It is the only object that mica writes more than once.
 - **Snapshot.** A name for one version, kept until it is deleted.
-- **Owner.** The node that has the disk attached. Only the owner writes.
-- **Local chunk.** A chunk whose current content is in the data file of the node. Guest writes go to local chunks.
+- **Owner.** The machine that has the disk attached. Only the owner writes.
+- **Local chunk.** A chunk whose current content is in the data file of the machine. Guest writes go to local chunks.
 - **Unsaved chunk.** A local chunk whose content is not in the bucket yet.
-- **Cache.** Files of clean chunks on the node, by hash. A clean chunk has the same content as an object in the bucket.
+- **Cache.** Files of clean chunks on the machine, by hash. A clean chunk has the same content as an object in the bucket.
 
 ## The layout in the bucket
 
@@ -55,7 +55,7 @@ A disk of 1 TiB with 256 KiB chunks has 4,096 pages. Its root has 160 KiB. A pag
 
 ## The head is the lock
 
-S3 has conditional writes. `If-None-Match: *` writes only if the key does not exist. `If-Match: <etag>` writes only if the object did not change since it was read. mica writes the head only with one of these two. Before `mica disk create`, mica checks that the bucket obeys both, and refuses a bucket that does not.
+S3 has conditional writes. `If-None-Match: *` writes only if the key does not exist. `If-Match: <etag>` writes only if the object did not change since it was read. mica writes the head only with one of these two. Before a bucket holds a disk, mica tests both with a probe object. It refuses a bucket that refuses them.
 
 The head holds:
 
@@ -74,11 +74,11 @@ The head holds:
 }
 ```
 
-To **claim** a disk, a node reads the head and writes it back with `If-Match`, with itself as the owner and `next` plus one. If another node wrote the head between the read and the write, the write fails, and the claim fails. A claim refuses a disk that another node owns. For a node that is gone for good, `mica disk release` writes the head with no owner, and adds the old `next` to `lost`. The unsaved data of that node is lost.
+To **claim** a disk, a machine reads the head and writes it back with `If-Match`, with itself as the owner and `next` plus one. If another machine wrote the head between the read and the write, the write fails, and the claim fails. A claim refuses a disk that another machine owns. For a machine that is gone for good, `mica disk release` writes the head with no owner, and adds the old `next` to `lost`. The unsaved data of that machine is lost.
 
 The owner writes the head at the end of each transaction, again with `If-Match`. When the write fails, somebody else changed the head. The owner then stops the disk: it refuses all I/O and keeps its local data.
 
-Each head write first reads the head and compares its version. With conditional writes, this read only finds a conflict early. Some stores, such as Garage, ignore the conditions. There the read is the only check, and it leaves a gap of a few milliseconds between the read and the write. So on such a store, attach a disk on one node only: `mica disk create` warns about it.
+Each head write first reads the head and compares its version. With conditional writes, this read only finds a conflict early. Some stores, such as Garage, ignore the conditions. There the read is the only check, and it leaves a gap of a few milliseconds between the read and the write. So on such a store, attach a disk on one machine only: `mica disk create` warns about it.
 
 ## A write
 
@@ -122,17 +122,17 @@ After a transaction, saved chunks stay local. A next write into them needs no co
 3. A chunk in the cache: read from the cache file.
 4. Else download the chunk, check its hash, put it into the cache, and read it.
 
-Many reads of one chunk share one download. The cache of the node is by hash, so many disks from one image download each chunk once for the node: a file of another disk is linked, not copied.
+Many reads of one chunk share one download. The cache of the machine is by hash, so many disks from one image download each chunk once for the machine: a file of another disk is linked, not copied.
 
 A read of local or cached data runs on the queue thread, without a copy: the file data goes into the request pages directly.
 
 ### Downloads before the reads
 
 - **Profile.** The head holds the first 64 MiB of chunks that the guest read in its last session. At attach, these download first, eight at a time. So a boot or a database start reads mostly from the cache.
-- **Read ahead.** Two sequential reads start a read ahead of 1 MiB, which grows to 8 MiB.
+- **Read ahead.** Three reads in sequence start a read ahead of 1 MiB, which grows to 8 MiB.
 - **Fill.** When the guest is quiet for 250 ms, the rest of the disk downloads into the cache, until the cache is 90 % full.
 
-Reads that wait always come first. The node has 128 download slots: 16 for read ahead, 32 for fill, and the rest for reads.
+Reads that wait always come first. The machine has 128 download slots: 16 for read ahead, 32 for fill, and the rest for reads.
 
 ## Freeing objects without a garbage collector
 
@@ -156,7 +156,7 @@ mica has no rollback. To go back, make a new disk from a snapshot:
 mica disk restore db before-upgrade db-old
 ```
 
-The restore copies the root, the pages and the chunks of the snapshot into the folders of the new disk with S3 `CopyObject`. The bucket copies the data. The node downloads nothing. The new disk is independent: a delete of the old disk does not touch it.
+The restore copies the root, the pages and the chunks of the snapshot into the folders of the new disk with S3 `CopyObject`. The bucket copies the data. The machine downloads nothing. The new disk is independent: a delete of the old disk does not touch it.
 
 ## Moving a disk
 
@@ -168,7 +168,7 @@ The restore copies the root, the pages and the chunks of the snapshot into the f
 4. Move the saved local chunks into the cache.
 5. Write the head with no owner, and delete the local folder.
 
-When detach returns, the bucket has all data, and any node can attach the disk.
+When detach returns, the bucket has all data, and any machine can attach the disk.
 
 **Attach** claims the disk, opens its local data, and makes the device. A disk that was never written has `"blank": true`: it needs a filesystem.
 
@@ -180,7 +180,7 @@ The local folder records the `id` of its disk and the version of its file layout
 |---|---|
 | The daemon stops (`systemctl restart mica`) | Each device stays in the kernel, paused. The daemon runs one last transaction and exits. The next daemon takes each device over with ublk user recovery. The guest sees a pause of about one second. |
 | The daemon crashes | Same, without the last transaction. The kernel sends the requests in flight again to the next daemon. The recent bitmap keeps the chunks written since the last flush. |
-| The node reboots | The devices and `/run` are gone. The local data and the credentials stay. At start, the daemon claims each disk again and makes a new device. It retries while the bucket cannot be reached. The local data becomes orphaned only when the head names another owner, or the disk is gone. |
+| The machine reboots | The devices and `/run` are gone. The local data and the credentials stay. At start, the daemon claims each disk again and makes a new device. It retries while the bucket cannot be reached. The local data becomes orphaned only when the head names another owner, or the disk is gone. |
 | Power loss | Same as a reboot. Writes after the last flush can be lost, as on any disk with a write cache. The dirty log makes sure that no torn data comes back. |
 | The bucket is down | Reads of local and cached data work. Writes go on until the unsaved data reaches its limit, then wait. Transactions retry. |
 | Somebody else changes the head | The owner fails its next head write, stops the disk, and keeps its local data as orphaned. |
@@ -191,11 +191,11 @@ The local folder records the `id` of its disk and the version of its file layout
 
 Each disk has three limits in its head, so they follow the disk:
 
-- `cache_bytes`: clean chunks kept on the node. 512 MiB by default.
+- `cache_bytes`: clean chunks kept on the machine. 512 MiB by default.
 - `unsaved_bytes`: data not in the bucket yet. Guest writes wait at this limit. 4 GiB by default.
 - `interval_seconds`: how often a transaction runs. 5 minutes by default.
 
-A long interval costs few requests: a chunk that the guest writes many times in one interval uploads once. A crash loses nothing, because the changes are on the local SSD. Only the loss of the node loses them.
+A long interval costs few requests: a chunk that the guest writes many times in one interval uploads once. A crash loses nothing, because the changes are on the local SSD. Only the loss of the machine loses them.
 
 The cache budget also limits the saved chunks in the data file. So a disk uses at most `unsaved_bytes + 2 × cache_bytes` of the local SSD.
 
@@ -203,7 +203,7 @@ The cache budget also limits the saved chunks in the data file. So a disk uses a
 
 ## Credentials
 
-A request can carry the keys of a bucket. The CLI takes each value from a flag, else from an `OBJECT_STORAGE_*` variable, else from the file of `--store`. The daemon keeps each bucket that a request gave and that worked, in `/var/lib/mica/buckets/`, mode 0600: the only copy of the keys on the node. A request without keys names a known bucket, or only a disk: then the daemon finds the disk in the buckets that it knows. The folder of an attached disk names the place of its bucket, so the daemon serves the disk again after a restart or a reboot with the keys of that place. New keys for a place replace the old ones, and the attached disks use them at once. [api.md](api.md) describes the requests.
+A request can carry the keys of a bucket. The CLI takes each value from a flag, else from an `OBJECT_STORAGE_*` variable, else from the file of `--store`. The daemon keeps each bucket that a request gave and that worked, in `/var/lib/mica/buckets/`, mode 0600: the only copy of the keys on the machine. A request without keys names a known bucket, or only a disk: then the daemon finds the disk in the buckets that it knows. The folder of an attached disk names the place of its bucket, so the daemon serves the disk again after a restart or a reboot with the keys of that place. New keys for a place replace the old ones, and the attached disks use them at once. [api.md](api.md) describes the requests.
 
 ## The code
 
@@ -217,10 +217,10 @@ A request can carry the keys of a bucket. The CLI takes each value from a flag, 
 | `owner.rs` | The claim of a disk |
 | `local/data_files.rs` | The sparse data file |
 | `local/dirty_log.rs` | The dirty log and the recent bitmap |
-| `local/cache.rs` | The chunk cache of the node |
+| `local/cache.rs` | The chunk cache of the machine |
 | `local/folder.rs` | The local folder of a disk and its state |
-| `local/buckets.rs` | The buckets that the node knows |
-| `transfers.rs` | The download and upload slots of the node |
+| `local/buckets.rs` | The buckets that the machine knows |
+| `transfers.rs` | The download and upload slots of the machine |
 | `disk/` | The engine of an attached disk: I/O, transactions, prefetch |
 | `ublk/` | The block device, its queue threads, and the zero-copy requests |
 | `daemon/` | The daemon, its operations, its API, the bucket of a request, and the throughput of each disk |
