@@ -7,6 +7,8 @@
 //! On a laptop or a desktop, `mica service add-disk` mounts a disk at each
 //! boot. Its unit only unmounts at shutdown: the local data stays, so a
 //! shutdown never waits for a full upload. The next boot goes on from it.
+//! The disk unit only wants mica.service, and does not require it: with
+//! `Requires=`, a restart of mica would unmount the disk too.
 
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
@@ -77,6 +79,7 @@ fn install(config: &Path) -> Result<()> {
          After=network-online.target\n\
          Wants=network-online.target\n\n\
          [Service]\n\
+         Type=notify\n\
          ExecStartPre=-/sbin/modprobe ublk_drv\n\
          ExecStart={} --config {} daemon\n\
          Restart=on-failure\n\
@@ -110,9 +113,8 @@ fn add_disk(config: &Path, store: Option<&Path>, disk: &str, path: &Path) -> Res
     let unit = format!(
         "[Unit]\n\
          Description=mica disk {disk} at {path}\n\
-         Requires=mica.service\n\
          After=mica.service network-online.target\n\
-         Wants=network-online.target\n\n\
+         Wants=mica.service network-online.target\n\n\
          [Service]\n\
          Type=oneshot\n\
          RemainAfterExit=yes\n\

@@ -260,9 +260,11 @@ disk.
 disk that was never written has `"blank": true`, and `mica disk mount`
 formats it.
 
-The local folder records the `id` of its disk. An attach refuses local data
-of another disk with the same name: one from another bucket, or one that
-was deleted and made again. It keeps such data as **orphaned**.
+The local folder records the `id` of its disk and the version of its file
+layout. A mica of another layout refuses the folder. An attach also
+refuses local data of another disk with the same name: one from another
+bucket, or one that was deleted and made again. It keeps such data as
+**orphaned**.
 
 ## Crashes and restarts
 
@@ -275,6 +277,7 @@ was deleted and made again. It keeps such data as **orphaned**.
 | The bucket is down | Reads of local and cached data work. Writes go on until the unsaved data reaches its limit, then wait. Transactions retry. |
 | Another node takes the disk | The old owner fails its next head write, stops the disk, and keeps its local data as orphaned. |
 | A local sync fails | The disk stops for good. Linux reports a write error only once, so a later sync that works proves nothing. |
+| A second daemon starts on the same folders | It refuses to start. Each daemon locks its data folder and its run folder. A stopping daemon can still run its last transactions, and two daemons on one folder would punch out the chunks of each other. |
 
 ## Budgets
 

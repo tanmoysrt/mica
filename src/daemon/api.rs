@@ -52,6 +52,7 @@ pub async fn serve(daemon: Arc<Daemon>, socket: &Path) -> Result<()> {
     let listener = UnixListener::bind(socket).with_context(|| format!("listen on {}", socket.display()))?;
     std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
     log::info!("listening on {}", socket.display());
+    notify_ready();
     loop {
         let (stream, _) = listener.accept().await?;
         tokio::spawn(answer(daemon.clone(), stream));
@@ -110,5 +111,23 @@ pub async fn call(socket: &Path, request: &Request) -> Result<Value> {
     match response.ok {
         true => Ok(response.result),
         false => anyhow::bail!(response.error.unwrap_or_default()),
+    }
+}
+
+/// Tells systemd that the daemon answers on its socket (`Type=notify`). So
+/// `systemctl start mica` returns only then, and units after mica.service,
+/// such as the mounts of `service add-disk`, find the daemon ready.
+fn notify_ready() {
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr, UnixDatagram};
+    let Some(path) = std::env::var_os("NOTIFY_SOCKET") else { return };
+    let bytes = std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str());
+    let address = match bytes.strip_prefix(b"@") {
+        Some(name) => SocketAddr::from_abstract_name(name),
+        None => SocketAddr::from_pathname(&path),
+    };
+    let sent = address.and_then(|address| UnixDatagram::unbound()?.send_to_addr(b"READY=1", &address));
+    if let Err(error) = sent {
+        log::warn!("cannot tell systemd that mica is ready: {error}");
     }
 }
