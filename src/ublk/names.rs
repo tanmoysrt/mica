@@ -20,7 +20,6 @@ pub const RULE_PATH: &str = "/etc/udev/rules.d/90-mica.rules";
 const LINKS: &str = "/dev/mica";
 const UDEV_WAIT: Duration = Duration::from_secs(5);
 
-/// The udev rule for the run folder `run_dir`.
 pub fn rule(run_dir: &Path) -> String {
     format!(
         "# mica: /dev/mica/<disk> for each mica device. Written by `mica service install`.\n\

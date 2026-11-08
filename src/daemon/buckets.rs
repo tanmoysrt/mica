@@ -85,7 +85,6 @@ impl Daemon {
         json!({ "buckets": buckets })
     }
 
-    /// Deletes the keys of a bucket. Refused while a disk of it is attached here.
     pub async fn forget_bucket(&self, name: &str) -> Result<Value> {
         let store = self.buckets.find(name)?;
         let place = store.place();

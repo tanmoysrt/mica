@@ -200,7 +200,6 @@ fn info(result: &Value) {
     table(&["SNAPSHOT", "TAKEN", ""], rows);
 }
 
-/// Where a disk is attached: here with its device, on another machine, or nowhere.
 fn place(disk: &Value) -> String {
     if let Some(device) = disk["local"]["device"].as_str() {
         return format!("{} here: {device}", style("●").green());
@@ -235,7 +234,6 @@ fn done(message: &str) {
     println!("{} {message}", style("✔").green().bold());
 }
 
-/// The next step, as a command to copy.
 fn next(what: &str, command: &str) {
     println!("  {what}: {}", style(command).cyan());
 }

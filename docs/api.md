@@ -1,14 +1,10 @@
 # The daemon API
 
-The `mica` command and any other program, such as an orchestrator, talk
-to the daemon in the same way. This page lists each request and its
-answer. [operations.md](operations.md) explains the commands for people.
+The `mica` command and any other program, such as an orchestrator, talk to the daemon in the same way. This page lists each request and its answer. [operations.md](operations.md) explains the commands for people.
 
 ## The socket
 
-The daemon listens on a Unix socket, `/run/mica.sock` by default (the
-`socket` setting). The socket belongs to root, with mode 0600, because a
-request can make devices and carry bucket keys.
+The daemon listens on a Unix socket, `/run/mica.sock` by default (the `socket` setting). The socket belongs to root, with mode 0600, because a request can make devices and carry bucket keys.
 
 A connection carries one request and one answer. Each is one line of JSON:
 
@@ -33,10 +29,7 @@ A request names its bucket in one of three ways:
 | `bucket` | The name of a bucket that the daemon knows: its bucket name, its name and prefix (`my-disks/laptop`), or its full place. |
 | neither | The daemon finds the disk in all the buckets that it knows. A new disk goes to the only bucket that it knows. |
 
-The **place** of a bucket is `<endpoint>/<bucket>/<prefix>`. Two configs
-with the same place reach the same disks. New keys for a known place
-replace the old ones, and the attached disks of that place use them at
-once.
+The **place** of a bucket is `<endpoint>/<bucket>/<prefix>`. Two configs with the same place reach the same disks. New keys for a known place replace the old ones, and the attached disks of that place use them at once.
 
 ```json
 {"command":"attach","disk":"web","store":{"endpoint":"https://<account>.r2.cloudflarestorage.com","bucket":"my-disks","prefix":"","region":"auto","access_key_id":"...","secret_access_key":"..."}}
@@ -66,12 +59,9 @@ Sizes are in bytes, and times are Unix seconds. A time of 0 means never.
 | `bucket-list` | | `buckets`: `bucket` (place), `endpoint`, `name`, `prefix`, `access_key_id`, `attached_here` |
 | `bucket-forget` | `name` | `forgotten`: the place |
 
-`limits` has `cache_bytes`, `unsaved_bytes` and `interval_seconds`. In
-`create` and `set`, each is optional: a missing one keeps the old value,
-or for a new disk the default (512 MiB, 4 GiB, 300 s).
+`limits` has `cache_bytes`, `unsaved_bytes` and `interval_seconds`. In `create` and `set`, each is optional: a missing one keeps the old value, or for a new disk the default (512 MiB, 4 GiB, 300 s).
 
-A disk attached on another node is refused with the host name of that
-node, so that a controller can send the request there.
+A disk attached on another node is refused with the host name of that node, so that a controller can send the request there.
 
 ## The status of a disk
 
@@ -92,5 +82,4 @@ Each entry of `disks` in `status`:
 | `status.requests` | Requests and bytes to the bucket since the attach: `get`, `put`, `list`, `delete`, `copy`, `bytes_in`, `bytes_out` |
 | `status.io` | Counters of the write path, for profiling |
 
-Each entry of `tasks` is a long operation, such as the copy of a restore:
-`disk`, `what`, `done` and `total`. A program can show progress from it.
+Each entry of `tasks` is a long operation, such as the copy of a restore: `disk`, `what`, `done` and `total`. A program can show progress from it.

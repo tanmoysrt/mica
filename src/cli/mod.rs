@@ -43,7 +43,6 @@ pub async fn run(cli: Cli, config: Config) -> Result<()> {
     Ok(())
 }
 
-/// `mica status` again each second, on a cleared screen.
 async fn watch(config: &Config) -> Result<()> {
     let terminal = console::Term::stdout();
     loop {
@@ -54,7 +53,6 @@ async fn watch(config: &Config) -> Result<()> {
     }
 }
 
-/// What the spinner says while the daemon works.
 fn waiting(command: &Call) -> String {
     match command {
         Call::Status => "Asking mica".into(),

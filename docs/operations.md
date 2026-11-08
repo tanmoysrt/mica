@@ -1,20 +1,13 @@
 # Running mica
 
-This guide shows how to install mica, how to use disks, and what to do
-when something goes wrong. [design.md](design.md) explains how mica works.
+This guide shows how to install mica, how to use disks, and what to do when something goes wrong. [design.md](design.md) explains how mica works.
 
 ## Requirements
 
-- Linux 6.16 or later, with the `ublk_drv` module. mica uses the zero-copy
-  and user-recovery features of ublk.
+- Linux 6.16 or later, with the `ublk_drv` module. mica uses the zero-copy and user-recovery features of ublk.
 - systemd, and root for the daemon.
 - A local SSD for `/var/lib/mica`.
-- An S3 bucket, best with conditional writes (`If-Match` and
-  `If-None-Match`): AWS S3, Cloudflare R2, MinIO and RustFS have them.
-  `mica disk create` checks the bucket first. A bucket that ignores them,
-  such as Garage, works, but mica cannot stop two machines from using one
-  disk there: attach each disk on one machine only. A bucket that refuses them,
-  such as Backblaze B2, cannot hold mica disks.
+- An S3 bucket, best with conditional writes (`If-Match` and `If-None-Match`): AWS S3, Cloudflare R2, MinIO and RustFS have them. `mica disk create` checks the bucket first. A bucket that ignores them, such as Garage, works, but mica cannot stop two machines from using one disk there: attach each disk on one machine only. A bucket that refuses them, such as Backblaze B2, cannot hold mica disks.
 
 ## Install
 
@@ -24,23 +17,13 @@ sudo cp ~/.cargo/bin/mica /usr/local/bin/
 sudo mica service install       # writes mica.service, starts it, and starts it at boot
 ```
 
-`mica service install` also upgrades: after a new binary, it restarts mica.
-The attached disks pause for about one second.
+`mica service install` also upgrades: after a new binary, it restarts mica. The attached disks pause for about one second.
 
-The machine settings are in `/etc/mica/config.toml`. The file is optional:
-see [config.example.toml](../config.example.toml) for each setting and its
-default.
+The machine settings are in `/etc/mica/config.toml`. The file is optional: see [config.example.toml](../config.example.toml) for each setting and its default.
 
 ## The bucket of a disk
 
-The first command on a bucket needs its place and its keys, such as
-`mica bucket add`, the first `mica disk create`, or the first
-`mica disk attach` of a disk that another machine made. mica keeps a
-bucket that works, root only, in `/var/lib/mica/buckets/`. This is the only
-copy of the keys on the machine. Later commands need only the name of the
-disk: mica finds the disk in the buckets that it knows. A new disk goes to
-the one bucket that mica knows. With more than one, pick one with
-`--bucket <name>`, with no keys.
+The first command on a bucket needs its place and its keys, such as `mica bucket add`, the first `mica disk create`, or the first `mica disk attach` of a disk that another machine made. mica keeps a bucket that works, root only, in `/var/lib/mica/buckets/`. This is the only copy of the keys on the machine. Later commands need only the name of the disk: mica finds the disk in the buckets that it knows. A new disk goes to the one bucket that mica knows. With more than one, pick one with `--bucket <name>`, with no keys.
 
 ```bash
 sudo mica bucket add --store s3.toml     # checks the bucket and keeps its keys
@@ -49,27 +32,20 @@ sudo mica disk create db --size 50G --bucket photos   # pick a known bucket
 sudo mica bucket forget photos           # delete its keys on this machine
 ```
 
-To rotate the keys of a bucket, give the new keys once, such as with
-`mica bucket add`. The attached disks of that bucket use them at once.
-`mica service uninstall` deletes the keys of all buckets.
+To rotate the keys of a bucket, give the new keys once, such as with `mica bucket add`. The attached disks of that bucket use them at once. `mica service uninstall` deletes the keys of all buckets.
 
 mica takes each value from the first of these that gives it:
 
-1. A flag: `--endpoint`, `--bucket`, `--prefix`, `--region`,
-   `--access-key-id`, `--secret-access-key`.
-2. A variable: `OBJECT_STORAGE_ENDPOINT`, `OBJECT_STORAGE_BUCKET`,
-   `OBJECT_STORAGE_PREFIX`, `OBJECT_STORAGE_REGION`,
-   `OBJECT_STORAGE_ACCESS_KEY_ID`, `OBJECT_STORAGE_SECRET_ACCESS_KEY`.
-3. A TOML file: `--store <file>`. See
-   [store.example.toml](../store.example.toml).
+1. A flag: `--endpoint`, `--bucket`, `--prefix`, `--region`, `--access-key-id`, `--secret-access-key`.
+2. A variable: `OBJECT_STORAGE_ENDPOINT`, `OBJECT_STORAGE_BUCKET`, `OBJECT_STORAGE_PREFIX`, `OBJECT_STORAGE_REGION`, `OBJECT_STORAGE_ACCESS_KEY_ID`, `OBJECT_STORAGE_SECRET_ACCESS_KEY`.
+3. A TOML file: `--store <file>`. See [store.example.toml](../store.example.toml).
 
 ```bash
 cp store.example.toml s3.toml && chmod 600 s3.toml     # then fill it in
 sudo mica disk create data --size 500G --store s3.toml
 ```
 
-Do not give the secret key as a flag on a shared machine: other users see
-the flags of a process in `ps`.
+Do not give the secret key as a flag on a shared machine: other users see the flags of a process in `ps`.
 
 Two disks can use two buckets with two sets of keys.
 
@@ -82,8 +58,7 @@ sudo mkfs.ext4 /dev/mica/data               # only for a new disk
 sudo mount -o discard /dev/mica/data /mnt/data
 ```
 
-Mount with `discard`: then the bucket also deletes the data of deleted
-files. To move the disk to another machine, unmount it and detach it:
+Mount with `discard`: then the bucket also deletes the data of deleted files. To move the disk to another machine, unmount it and detach it:
 
 ```bash
 sudo umount /mnt/data
@@ -100,9 +75,7 @@ firecracker ...  # drive path_on_host = /dev/mica/vm-data
 sudo mica disk detach vm-data               # after the VM stops
 ```
 
-The main use is a data disk: the VM boots from a local root disk, and the
-mica disk holds its data, such as a database. A VM can also boot from a
-mica disk.
+The main use is a data disk: the VM boots from a local root disk, and the mica disk holds its data, such as a database. A VM can also boot from a mica disk.
 
 `mica disk detach` refuses a disk that is mounted or open.
 
@@ -124,26 +97,19 @@ mica disk.
 | `mica bucket add / ls / forget` | The buckets that the machine keeps keys for |
 | `mica service install / uninstall / status` | The systemd unit `mica.service` |
 
-Each command prints the next step as a command to copy. `--json` prints
-the answer of the daemon as JSON instead: [api.md](api.md) lists each
-answer. `mica status --json` also shows
-the requests and bytes of each disk since its attach.
+Each command prints the next step as a command to copy. `--json` prints the answer of the daemon as JSON instead: [api.md](api.md) lists each answer. `mica status --json` also shows the requests and bytes of each disk since its attach.
 
 ### Choose the chunk size
 
-The chunk size is fixed when the disk is made. A transaction uploads each
-changed chunk, so the chunk size sets the number of requests.
+The chunk size is fixed when the disk is made. A transaction uploads each changed chunk, so the chunk size sets the number of requests.
 
 - **1 MiB** (the default) suits most disks: files, databases, boot disks.
-- **4 MiB** suits large files, such as photos, video and backups. Fewer
-  chunks mean fewer requests.
-- **256 KiB or less** makes cold random reads cheaper, but a busy disk
-  makes more requests.
+- **4 MiB** suits large files, such as photos, video and backups. Fewer chunks mean fewer requests.
+- **256 KiB or less** makes cold random reads cheaper, but a busy disk makes more requests.
 
 ## A disk on a laptop or a desktop
 
-mica can give a laptop a large disk whose data lives in a bucket. sudo is
-needed once, to set it up:
+mica can give a laptop a large disk whose data lives in a bucket. sudo is needed once, to set it up:
 
 ```bash
 sudo mica service install
@@ -154,30 +120,15 @@ echo "/dev/mica/photos $HOME/photos ext4 discard,nofail,x-systemd.requires=mica.
 mkdir -p ~/photos && sudo mount ~/photos && sudo chown "$USER:" ~/photos
 ```
 
-After that, use `~/photos` with no sudo. At each boot, mica attaches the
-disk again before systemd mounts it. `mica service install` writes a udev
-rule, `/etc/udev/rules.d/90-mica.rules`, so that udev names each device
-`/dev/mica/<disk>` and systemd knows it: the fstab line waits for that
-device. This was tested with two reboots of a server, with unsaved data on
-the disk at each reboot.
+After that, use `~/photos` with no sudo. At each boot, mica attaches the disk again before systemd mounts it. `mica service install` writes a udev rule, `/etc/udev/rules.d/90-mica.rules`, so that udev names each device `/dev/mica/<disk>` and systemd knows it: the fstab line waits for that device. This was tested with two reboots of a server, with unsaved data on the disk at each reboot.
 
-At shutdown, systemd unmounts the disk, and mica runs a last transaction.
-The local data stays on the laptop. So a shutdown never waits for a full
-upload, and the next boot goes on from the local data. Give the disk a
-large cache, so that most reads stay local when the laptop is offline.
-Without a network, reads of data that is not local fail, and writes wait
-when the unsaved data reaches its limit.
+At shutdown, systemd unmounts the disk, and mica runs a last transaction. The local data stays on the laptop. So a shutdown never waits for a full upload, and the next boot goes on from the local data. Give the disk a large cache, so that most reads stay local when the laptop is offline. Without a network, reads of data that is not local fail, and writes wait when the unsaved data reaches its limit.
 
 ## Restart, upgrade and crashes
 
-`sudo systemctl restart mica` keeps the disks attached and the file
-systems mounted. Each device pauses for about a second. Use it to upgrade
-mica: replace the binary, then restart.
+`sudo systemctl restart mica` keeps the disks attached and the file systems mounted. Each device pauses for about a second. Use it to upgrade mica: replace the binary, then restart.
 
-After a crash, systemd starts mica again, and mica takes the devices over.
-After a reboot, mica attaches each disk that the node held again. When the
-bucket cannot be reached at boot, mica tries again every 10 seconds. A
-mount with `nofail` does not stop the boot: mount it when the disk is back.
+After a crash, systemd starts mica again, and mica takes the devices over. After a reboot, mica attaches each disk that the node held again. When the bucket cannot be reached at boot, mica tries again every 10 seconds. A mount with `nofail` does not stop the boot: mount it when the disk is back.
 
 ## When something goes wrong
 

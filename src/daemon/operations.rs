@@ -85,7 +85,6 @@ impl Daemon {
         Ok(info)
     }
 
-    /// The state on this node of a disk from the bucket, when it is attached here.
     async fn local_state(&self, disk: &Value) -> Value {
         let status = self.status().await;
         let here = status["disks"].as_array().into_iter().flatten().find(|attached| attached["disk"] == disk["disk"] && attached["bucket"] == disk["bucket"]);

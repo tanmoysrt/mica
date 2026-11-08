@@ -66,7 +66,6 @@ impl KnownBuckets {
         }
     }
 
-    /// Deletes the keys of the bucket.
     pub fn forget(&self, store: &StoreConfig) -> Result<()> {
         Ok(std::fs::remove_file(self.path(&store.place()))?)
     }

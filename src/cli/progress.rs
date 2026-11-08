@@ -16,7 +16,6 @@ const POLL: Duration = Duration::from_millis(500);
 /// Bytes up before the speed of an upload means much.
 const SETTLED: u64 = 8 << 20;
 
-/// Sends the request, and shows a spinner with `message` until the answer.
 pub async fn call_with_spinner(socket: &Path, request: &Request, message: String) -> Result<Value> {
     let spinner = ProgressBar::new_spinner().with_style(ProgressStyle::with_template("{spinner:.cyan} {msg}").unwrap()).with_message(message);
     spinner.enable_steady_tick(TICK);
@@ -110,7 +109,6 @@ fn bar_style(template: &str) -> ProgressStyle {
     ProgressStyle::with_template(template).unwrap().progress_chars("━━─")
 }
 
-/// Such as 45s, 2m 05s or 1h 10m.
 fn clock(seconds: u64) -> String {
     match seconds {
         0..60 => format!("{seconds}s"),
