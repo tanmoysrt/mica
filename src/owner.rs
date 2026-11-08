@@ -73,6 +73,25 @@ impl Claim {
         Ok(Self { store, current })
     }
 
+    /// The escape hatch for a node that is gone for good: gives its disk
+    /// free without it, and returns its name. The unsaved data of that node
+    /// is lost. If it still runs, it stops at its next head write. Its
+    /// folder `next` goes into `lost`, so the next owner deletes what it
+    /// still uploads.
+    pub async fn release_from(store: &DiskStore, node: &NodeId) -> Result<String> {
+        let current = store.require_head().await?;
+        let Some(owner) = current.head.owner.clone() else { bail!("disk {} is not attached", store.disk) };
+        if owner.id == node.id {
+            bail!("disk {} is attached on this node: detach it", store.disk);
+        }
+        let mut head = current.head.clone();
+        head.owner = None;
+        head.lost.push(head.next);
+        head.next += 1;
+        store.replace_head(&current, head).await?;
+        Ok(owner.node)
+    }
+
     /// Makes a new disk and claims it, in one write.
     pub async fn create(store: DiskStore, node: &NodeId, mut head: Head) -> Result<Self> {
         head.owner = Some(node.owner());

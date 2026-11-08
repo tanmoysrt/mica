@@ -102,7 +102,9 @@ The head holds:
 To **claim** a disk, a node reads the head and writes it back with
 `If-Match`, with itself as the owner and `next` plus one. If another node
 wrote the head between the read and the write, the write fails, and the
-claim fails. A claim refuses a disk that another node owns.
+claim fails. A claim refuses a disk that another node owns. For a node
+that is gone for good, `mica disk release` writes the head with no owner,
+and adds the old `next` to `lost`. The unsaved data of that node is lost.
 
 The owner writes the head at the end of each transaction, again with
 `If-Match`. When the write fails, somebody else changed the head. The owner

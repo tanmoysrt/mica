@@ -60,6 +60,7 @@ pub fn print(request: &Request, result: &Value) {
         Request::Restore { target, .. } => println!("Made disk {target} from the snapshot: {} objects copied", result["copied_objects"]),
         Request::SnapshotCreate { disk, snapshot, .. } => println!("Took snapshot {snapshot} of disk {disk} at transaction {}", result["transaction"]),
         Request::SnapshotDelete { snapshot, .. } => println!("Deleted snapshot {snapshot}"),
+        Request::Release { disk, .. } => println!("Released disk {disk} from {}. Its unsaved data there is lost", text(&result["released_from"])),
         Request::Delete { disk, .. } => println!("Deleted disk {disk}"),
         Request::Set { disk, .. } => println!(
             "Disk {disk}: size {}, cache budget {}, unsaved limit {}, interval {}",

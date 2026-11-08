@@ -100,6 +100,7 @@ mica disk.
 | `mica disk detach <disk>` | Uploads all data and gives the disk free |
 | `mica disk set <disk> [--size] [--cache-size] [--unsaved-size] [--interval]` | New limits, or a larger size (detached only) |
 | `mica disk restore <disk> <snapshot> <new disk>` | A new disk from a snapshot |
+| `mica disk release <disk>` | Gives free a disk whose node is gone for good. The unsaved data of that node is lost. |
 | `mica disk delete <disk>` | Deletes the disk and its snapshots. Refused while another node has it. |
 | `mica snapshot create / delete <disk> <name>` | Snapshots. A create uploads all changes first. |
 | `mica service install / uninstall / status` | The systemd unit `mica.service` |
@@ -157,7 +158,7 @@ mount with `nofail` does not stop the boot: mount it when the disk is back.
 
 | Message | Meaning | What to do |
 |---|---|---|
-| `disk … is attached on <node>` | Another node owns the disk | Detach it there. |
+| `disk … is attached on <node>` | Another node owns the disk | Detach it there. When that node is gone for good, run `mica disk release <disk>`. |
 | `stopped: another node took the disk` | Somebody else changed the head of the disk | The local data is kept as orphaned in `/var/lib/mica/disks/<disk>`. Copy out what you need, then delete the folder. |
 | `… has orphaned local data` | The folder holds data that is not in the bucket | Same as above. |
 | `the local data … is of another disk` | A disk with this name was deleted and made again | The old data is kept as orphaned. |

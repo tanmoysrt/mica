@@ -74,6 +74,8 @@ pub enum DiskCommand {
         #[command(flatten)]
         limits: LimitArgs,
     },
+    /// Give free a disk whose node is gone for good. The unsaved data of that node is lost.
+    Release { disk: String },
     /// Delete a disk and all its snapshots.
     Delete { disk: String },
     /// Make a new disk from a snapshot.
@@ -179,6 +181,7 @@ pub async fn run(cli: Cli, config: Config) -> Result<()> {
         Command::Disk(DiskCommand::Set { disk, size, limits }) => {
             Request::Set { store: store()?, disk, size: size.as_deref().map(parse_size).transpose()?, limits: limits.request()? }
         }
+        Command::Disk(DiskCommand::Release { disk }) => Request::Release { store: store()?, disk },
         Command::Disk(DiskCommand::Delete { disk }) => Request::Delete { store: store()?, disk },
         Command::Disk(DiskCommand::Restore { disk, snapshot, new_disk }) => {
             Request::Restore { store: store()?, disk, snapshot, target: new_disk }

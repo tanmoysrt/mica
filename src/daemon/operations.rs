@@ -116,6 +116,12 @@ impl Daemon {
         Ok(describe(name, &head))
     }
 
+    pub async fn release(&self, store: &StoreConfig, name: &str) -> Result<Value> {
+        let disk = DiskStore::new(Arc::new(Bucket::connect(store)?), name);
+        let node = Claim::release_from(&disk, &self.node).await?;
+        Ok(json!({ "disk": name, "released_from": node }))
+    }
+
     /// Makes the new disk `target` from a snapshot of `name`.
     pub async fn restore(&self, store: &StoreConfig, name: &str, snapshot: &str, target: &str) -> Result<Value> {
         validate_name(target)?;

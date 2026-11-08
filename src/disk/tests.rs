@@ -167,6 +167,24 @@ async fn a_changed_head_stops_the_owner() {
 }
 
 #[tokio::test]
+async fn a_release_gives_the_disk_of_a_dead_node_free() {
+    let rig = Rig::new();
+    rig.create("stuck").await;
+    let disk = rig.attach("stuck").await;
+    disk.write(0, pattern(2, 4096)).await.unwrap();
+    disk.transaction(TransactionKind::All, None).await.unwrap();
+    let other = NodeId { hostname: "other".into(), id: "node-b".into() };
+    assert!(Claim::release_from(&rig.store("stuck"), &rig.node).await.is_err(), "the owner detaches instead");
+    assert_eq!(Claim::release_from(&rig.store("stuck"), &other).await.unwrap(), "test");
+    // The old node still runs: it stops at its next head write.
+    disk.write(0, pattern(3, 4096)).await.unwrap();
+    assert!(disk.transaction(TransactionKind::All, None).await.is_err());
+    let mut claim = Claim::take(rig.store("stuck"), &other).await.unwrap();
+    claim.release().await.unwrap();
+    rig.check("stuck").await;
+}
+
+#[tokio::test]
 async fn local_chunks_come_back_after_a_crash() {
     let rig = Rig::new();
     rig.create("crash").await;
