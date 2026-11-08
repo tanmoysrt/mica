@@ -162,7 +162,7 @@ impl Bucket {
         }
         .await;
         let _ = self.delete_all(vec![key]).await;
-        result.context("this store cannot hold mica disks: it refuses conditional writes")
+        result.context("this bucket cannot hold mica disks: it refuses conditional writes")
     }
 
     pub async fn put(&self, key: &str, data: impl Into<Bytes>) -> Result<()> {

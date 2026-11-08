@@ -116,6 +116,10 @@ async fn the_status_of_a_disk_with_unsaved_data_returns() {
     let copy = disk.clone();
     std::thread::spawn(move || sender.send(copy.status().unsaved_bytes));
     assert_eq!(receiver.recv_timeout(std::time::Duration::from_secs(5)).expect("status deadlocks"), CHUNK);
+    disk.write(CHUNK, pattern(2, 4096)).await.unwrap();
+    disk.transaction(TransactionKind::All, None).await.unwrap();
+    let status = disk.status();
+    assert_eq!((status.unsaved_bytes, status.staged_bytes), (0, 0), "a done transaction leaves nothing staged");
     rig.detach(disk).await;
 }
 

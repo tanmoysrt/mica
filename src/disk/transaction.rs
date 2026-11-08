@@ -127,7 +127,7 @@ impl Disk {
             memory.uploaded.extend(written);
             self.unstage(&pending).await;
             if error.is::<HeadConflict>() {
-                self.stop("another node took the disk");
+                self.stop("another machine took the disk");
             }
             return Err(error);
         }
@@ -192,7 +192,7 @@ impl Disk {
             if checked.elapsed() >= OWNER_CHECK {
                 checked = Instant::now();
                 match self.claim.lock().await.still_owned().await {
-                    Ok(false) => self.stop("another node took the disk"),
+                    Ok(false) => self.stop("another machine took the disk"),
                     Ok(true) => {}
                     Err(error) => log::warn!("disk {}: cannot read the head: {error:#}", self.name),
                 }
@@ -262,6 +262,7 @@ impl Disk {
                 (entry, Some(self.store.chunk_key(next, index)))
             }
         };
+        self.staged_bytes.fetch_add(self.chunk_size, Ordering::Relaxed);
         Ok(Some((Change { index, old, new }, key)))
     }
 
@@ -312,6 +313,7 @@ impl Disk {
     /// Each staged chunk that the guest did not write again is saved now.
     async fn finish(&self, changes: &[Change]) {
         for change in changes {
+            self.staged_bytes.fetch_sub(self.chunk_size, Ordering::Relaxed);
             let Some(slot) = self.slots.loaded(change.index) else { continue };
             let mut slot = slot.write_owned().await;
             slot.base = change.new;
@@ -325,6 +327,7 @@ impl Disk {
     }
 
     async fn unstage(&self, pending: &[usize]) {
+        self.staged_bytes.store(0, Ordering::Relaxed);
         for &index in pending {
             if let Some(slot) = self.slots.loaded(index) {
                 slot.write_owned().await.staged = false;

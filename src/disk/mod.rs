@@ -65,6 +65,8 @@ pub struct Disk {
     ahead: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Range<usize>>>>,
 
     unsaved: Mutex<BTreeSet<usize>>,
+    /// Unsaved data that the running transaction has read and uploaded already.
+    staged_bytes: AtomicU64,
     /// All local chunks, saved or not: what the dirty log lists.
     local: Arc<Mutex<BTreeSet<usize>>>,
     /// Saved local chunks, oldest first.
@@ -101,6 +103,8 @@ pub struct Status {
     /// When the last transaction ended, in Unix seconds. 0 for none.
     pub saved_time: u64,
     pub unsaved_bytes: u64,
+    /// The part of `unsaved_bytes` that the running transaction has uploaded already.
+    pub staged_bytes: u64,
     pub local_bytes: u64,
     pub cache_bytes: u64,
     pub limits: Limits,
@@ -179,6 +183,7 @@ impl Disk {
             read_ahead: Mutex::default(),
             ahead: Mutex::new(None),
             unsaved: Mutex::default(),
+            staged_bytes: AtomicU64::new(0),
             local: Arc::default(),
             saved: Mutex::default(),
             unpunched: Mutex::default(),
@@ -229,6 +234,7 @@ impl Disk {
             transaction: self.version.load(Ordering::SeqCst),
             saved_time,
             unsaved_bytes,
+            staged_bytes: self.staged_bytes.load(Ordering::Relaxed).min(unsaved_bytes),
             local_bytes,
             cache_bytes: self.cache.usage().bytes,
             limits,

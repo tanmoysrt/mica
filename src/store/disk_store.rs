@@ -23,7 +23,7 @@ pub struct HeadConflict;
 
 impl std::fmt::Display for HeadConflict {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("the head changed: another node took the disk")
+        f.write_str("the head changed: another machine took the disk")
     }
 }
 

@@ -25,14 +25,18 @@ pub async fn call_with_spinner(socket: &Path, request: &Request, message: String
 }
 
 /// Sends a request that uploads the unsaved data of `disk`, and shows the
-/// upload: the unsaved bytes at the start, and the bytes up since then.
+/// upload. The data left is the unsaved data that no running transaction
+/// has uploaded yet. A transaction that runs at the start already counts.
 pub async fn call_with_upload(socket: &Path, request: &Request, disk: &str, message: String) -> Result<Value> {
-    let mut start: Option<(u64, u64)> = None;
+    let (mut total, mut done) = (0, 0);
     let sample = move |status: &Value| {
         let found = status["disks"].as_array()?.iter().find(|found| found["disk"] == disk)?;
-        let (unsaved, uploaded) = (found["status"]["unsaved_bytes"].as_u64()?, found["status"]["requests"]["bytes_out"].as_u64()?);
-        let (total, base) = *start.get_or_insert((unsaved, uploaded));
-        (total > 0).then(|| (uploaded.saturating_sub(base).min(total), total))
+        let left = found["status"]["unsaved_bytes"].as_u64()?.saturating_sub(found["status"]["staged_bytes"].as_u64()?);
+        // Grows when a later transaction takes chunks that the first one left out.
+        total = total.max(done + left);
+        // Two locks in the daemon: a sample can lag one chunk behind the last.
+        done = done.max(total - left);
+        (total > 0).then_some((done, total))
     };
     follow(socket, request, message, sample, upload_style).await
 }

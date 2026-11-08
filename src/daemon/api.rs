@@ -100,6 +100,7 @@ async fn answer(daemon: Arc<Daemon>, stream: UnixStream) {
 async fn run(daemon: &Arc<Daemon>, request: Request) -> Result<Value> {
     let named = request.bucket.as_deref().map(|name| daemon.buckets.find(name)).transpose()?;
     let store = request.store.as_ref().or(named.as_ref());
+    let adding = matches!(request.command, Command::BucketAdd);
     let result = match request.command {
         Command::Status => Ok(daemon.status().await),
         Command::List => daemon.list(store).await,
@@ -120,6 +121,9 @@ async fn run(daemon: &Arc<Daemon>, request: Request) -> Result<Value> {
     if let (Ok(_), Some(store)) = (&result, store)
         && let Err(error) = daemon.remember(store).await
     {
+        if adding {
+            return Err(error.context("cannot keep the bucket"));
+        }
         log::warn!("cannot keep the bucket {}: {error:#}", store.place());
     }
     result

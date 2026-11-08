@@ -283,6 +283,7 @@ fn ago(time: &Value) -> String {
         0..60 => format!("{seconds} s ago"),
         60..3600 => format!("{} min ago", seconds / 60),
         3600..86400 => format!("{} h ago", seconds / 3600),
+        86400..172800 => "1 day ago".into(),
         _ => format!("{} days ago", seconds / 86400),
     }
 }
