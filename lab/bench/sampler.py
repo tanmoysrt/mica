@@ -1,30 +1,26 @@
 #!/usr/bin/env python3
-"""Every second: unsaved bytes, local chunks and S3 bytes of the lab daemon, as TSV."""
+"""Every second: unsaved and local MiB, and S3 MiB of the attached disks of the lab daemon, as TSV."""
 import json
-import socket
+import os
+import subprocess
 import sys
 import time
 
+# The v2 socket is root only: the CLI asks through the lab root helper.
+LAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 out = open(sys.argv[1], "a", buffering=1)
-out.write("t\tunsaved_MiB\tlocal_chunks\ts3_in_MiB\ts3_out_MiB\n")
+out.write("t\tunsaved_MiB\tlocal_MiB\ts3_in_MiB\ts3_out_MiB\n")
 while True:
     try:
-        s = socket.socket(socket.AF_UNIX)
-        s.settimeout(2)
-        s.connect("/run/mica-lab.sock")
-        s.sendall(b'{"command":"status"}\n')
-        data = b""
-        while not data.endswith(b"\n"):
-            chunk = s.recv(65536)
-            if not chunk:
-                break
-            data += chunk
-        s.close()
-        r = json.loads(data)["result"]
+        status = subprocess.run([f"{LAB}/lab.sh", "mica", "status", "--json"], capture_output=True, timeout=5, check=True)
+        r = json.loads(status.stdout)
         disks = [d["status"] for d in r["disks"] if "status" in d]
         unsaved = sum(d["unsaved_bytes"] for d in disks) >> 20
-        chunks = sum(d["local_chunks"] for d in disks)
-        out.write(f"{time.time():.1f}\t{unsaved}\t{chunks}\t{r['s3']['bytes_in'] >> 20}\t{r['s3']['bytes_out'] >> 20}\n")
+        local = sum(d["local_bytes"] for d in disks) >> 20
+        s3_in = sum(d["requests"]["bytes_in"] for d in disks) >> 20
+        s3_out = sum(d["requests"]["bytes_out"] for d in disks) >> 20
+        out.write(f"{time.time():.1f}\t{unsaved}\t{local}\t{s3_in}\t{s3_out}\n")
     except Exception as error:
         out.write(f"{time.time():.1f}\terror {error}\n")
     time.sleep(1)

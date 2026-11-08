@@ -27,10 +27,9 @@ step() { # label command...
     "$@" > /tmp/mica-lab-step.out 2>&1 || { echo "FAILED: $label"; cat /tmp/mica-lab-step.out; exit 1; }
     echo "$label: $(since "$t") s"
 }
-# Read rounds measure reads alone: no background fill unless asked.
-attach_mount() { mica disk attach "$DISK" ${ATTACH_ARGS:---no-fill} && "${ROOT[@]}" mount "$DISK" ext4; }
+attach_mount() { mica disk attach "$DISK" && "${ROOT[@]}" mount "$DISK" ext4; }
 umount_detach() { "${ROOT[@]}" umount "$DISK" && mica disk detach "$DISK"; }
-cold() { mica cache prune -y >/dev/null; "${ROOT[@]}" drop-caches; }
+cold() { "$LAB/lab.sh" cold "$DISK" >/dev/null; }
 
 python3 "$BENCH/sampler.py" "$OUT/host-samples.tsv" &
 sampler=$!

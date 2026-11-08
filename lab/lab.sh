@@ -10,7 +10,8 @@ LAB=$(cd "$(dirname "$0")" && pwd)
 REPO=$(dirname "$LAB")
 CACHE=${MICA_LAB_CACHE:-$HOME/.cache/mica-lab}
 ROOT=(sudo -n /usr/local/sbin/mica-lab-root)
-MICA=("$REPO/target/release/mica" --config "$LAB/config.toml")
+# The v2 socket is root only, so the CLI runs through the root helper.
+MICA=(sudo -n /usr/local/sbin/mica-lab-root cli)
 FC_DISK=${FC_DISK:-lab-fc}
 FC_SIZE=${FC_SIZE:-100G}
 # ubuntu (systemd) or alpine (OpenRC).
@@ -42,6 +43,8 @@ up() {
     "${ROOT[@]}" install
     "${ROOT[@]}" restart
     "${ROOT[@]}" limits "$DISK_MIBPS" "$DISK_IOPS"
+    until "${MICA[@]}" status >/dev/null 2>&1; do sleep 0.2; done
+    "${MICA[@]}" bucket add --store "$LAB/store.toml" >/dev/null
     "${MICA[@]}" status
 }
 
@@ -61,18 +64,33 @@ shape() {
 # (such as a baseline build). A given binary goes to target/release, and
 # src/main.rs is touched, so that the next cargo build replaces it again.
 deploy() {
-    # v0.1 and v0.2 store disks in different formats: each gets its own prefix.
     if [[ -n ${1:-} ]]; then
         cp "$1" "$REPO/target/release/mica"
         touch "$REPO/src/main.rs"
-        sed -i "s/^prefix = .*/prefix = \"${PREFIX:-}\"/" "$LAB/config.toml"
     else
         cargo build --release --manifest-path "$REPO/Cargo.toml"
-        sed -i "s/^prefix = .*/prefix = \"${PREFIX:-v2}\"/" "$LAB/config.toml"
     fi
     "${ROOT[@]}" deploy
     "${ROOT[@]}" restart
     until "${MICA[@]}" status >/dev/null 2>&1; do sleep 0.2; done
+}
+
+# Uploads all changes of a disk now: a snapshot takes them all.
+save() {
+    local name=save-$$
+    "${MICA[@]}" snapshot create "$1" "$name" >/dev/null && "${MICA[@]}" snapshot delete "$1" "$name" >/dev/null
+}
+
+# MiB downloaded and uploaded by the attached disks since their attach.
+s3() {
+    "${MICA[@]}" status --json | jq -r '[.disks[].status.requests] | "\((map(.bytes_in) | add // 0) / 1048576 | floor) \((map(.bytes_out) | add // 0) / 1048576 | floor)"'
+}
+
+# A cold start for a detached disk: no cache on the node, no page cache.
+cold() {
+    "${ROOT[@]}" drop-cache "$1"
+    until "${MICA[@]}" status >/dev/null 2>&1; do sleep 0.2; done
+    "${ROOT[@]}" drop-caches
 }
 
 fc_image() {
@@ -155,6 +173,9 @@ usage: lab.sh <command>
   shape         apply lab.env again (link rates, latency, disk limits)
   deploy [bin]  build and run the current tree, or run the given mica binary
   mica ...      the mica CLI against the lab daemon
+  save <disk>   upload all changes of a disk now
+  s3            MiB downloaded and uploaded by the attached disks
+  cold <disk>   drop the node cache of a detached disk, and the page cache
   fc-image      build the guest kernel, ssh key and rootfs tarball
   fc-disk       make $FC_DISK ($FC_SIZE) with the root filesystem
   fc-up         boot Firecracker on /dev/mica/$FC_DISK (IO_ENGINE=Async|Sync)
@@ -170,6 +191,9 @@ case ${1:-} in
     shape) shape ;;
     deploy) shift; deploy "$@" ;;
     mica) shift; "${MICA[@]}" "$@" ;;
+    save) save "$2" ;;
+    s3) s3 ;;
+    cold) cold "$2" ;;
     fc-image) fc_image ;;
     fc-disk) fc_disk ;;
     fc-up) fc_up ;;

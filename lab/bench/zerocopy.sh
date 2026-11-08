@@ -46,7 +46,7 @@ created=()
 cleanup() {
     for name in "${created[@]}"; do
         mica disk detach "$name" >/dev/null 2>&1
-        mica disk delete "$name" -y >/dev/null
+        mica disk delete "$name" >/dev/null
     done
     "${ROOT[@]}" limits "$DISK_MIBPS" "$DISK_IOPS" >/dev/null
 }
@@ -59,7 +59,7 @@ for name in "${names[@]}"; do
 done
 echo "  rss after attach: $(rss_mib VmRSS) MiB"
 phase "fill, 1M write, new chunks" write 1024 4 "$MIB" 0
-for name in "${names[@]}"; do mica disk checkpoint "$name" >/dev/null; done
+for name in "${names[@]}"; do "$LAB/lab.sh" save "$name"; done
 phase "1M read, local" read 1024 4 "$MIB" "$SECONDS_PER_PHASE"
 phase "4K randread, local" randread 4 8 "$MIB" "$SECONDS_PER_PHASE"
 phase "1M write, local" write 1024 4 "$MIB" "$SECONDS_PER_PHASE"

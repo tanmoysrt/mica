@@ -1,0 +1,7 @@
+# The bucket of the crash test. bench/crash.sh sets a new prefix for each test.
+endpoint = "http://172.31.99.10:9000"
+bucket = "mica-lab"
+prefix = "crash-1794168309"
+region = "us-east-1"
+access_key_id = "micalab"
+secret_access_key = "micalab-secret"

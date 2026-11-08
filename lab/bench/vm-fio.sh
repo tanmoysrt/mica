@@ -25,7 +25,7 @@ echo "== guest fio $(date -Is) | $(docker logs mica-lab-shaper 2>&1 | tail -1) |
 settle() {
     [[ ${1:-} == settle ]] || return 0
     vm sync
-    mica disk checkpoint "$FC_DISK" >/dev/null 2>&1 || sleep 200
+    "$LAB/lab.sh" save "$FC_DISK"
 }
 matrix() { # [settle]
     for x in "randread 4k 32" "randwrite 4k 32" "randread 4k 1" "randwrite 4k 1"; do
@@ -42,13 +42,12 @@ vm "fio --name=lay --filename=/root/fio.dat --size=4G --rw=write --bs=1M --iodep
 echo "[right after a 4 GiB write]"
 matrix
 vm sync
-# v0.1 has no checkpoint command: its timer uploads within 180 s.
-mica disk checkpoint "$FC_DISK" >/dev/null 2>&1 || { echo "  (no checkpoint command: waiting 200 s)"; sleep 200; }
+"$LAB/lab.sh" save "$FC_DISK"
 echo "[nothing waits for upload, before each test]"
 MODE=settle matrix
 "$LAB/lab.sh" fc-down >/dev/null
 mica disk detach "$FC_DISK" >/dev/null
-mica disk delete "$FC_DISK" -y >/dev/null
+mica disk delete "$FC_DISK" >/dev/null
 echo DONE
 exit
 }

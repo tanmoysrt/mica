@@ -1,0 +1,8 @@
+# The lab bucket: RustFS in Docker (compose.yaml). Test keys, local only.
+# `lab.sh up` gives it to the lab daemon once.
+endpoint = "http://172.31.99.10:9000"
+bucket = "mica-lab"
+prefix = "v2"
+region = "us-east-1"
+access_key_id = "micalab"
+secret_access_key = "micalab-secret"

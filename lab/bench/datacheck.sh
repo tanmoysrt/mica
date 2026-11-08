@@ -1,6 +1,6 @@
 #!/bin/bash
 # Data check of the ublk paths: datacheck.py on a disk with a small cache
-# and a small pending-write budget, so requests take every path: local
+# and a small unsaved limit, so requests take every path: local
 # chunks, parts never written, cache misses to S3, writes into chunks that
 # are not local, FUA, discard, write-zeroes. Then a reattach and a full read.
 #   bench/datacheck.sh <results folder> [ops]     (LABEL names the build)
@@ -25,17 +25,19 @@ trap 'rm -f "$model"' EXIT
 attach() { mica disk attach "$DISK" >/dev/null && "${ROOT[@]}" own "$DISK" >/dev/null; }
 
 echo "== data check $(date -Is) | ${LABEL:-}"
-mica disk create "$DISK" --size 512M --cache-size 32M --dirty-size 64M >/dev/null
+mica disk create "$DISK" --size 512M --cache-size 32M --unsaved-size 64M >/dev/null
 attach
+CHUNK_KIB=$(( $(mica --json disk info "$DISK" | jq .chunk_size) >> 10 ))
+export CHUNK_KIB
 python3 "$BENCH/datacheck.py" run "$dev" "$model" "$OPS" 1
-mica disk checkpoint "$DISK" >/dev/null
+"$LAB/lab.sh" save "$DISK"
 python3 "$BENCH/datacheck.py" run "$dev" "$model" "$OPS" 2
 mica disk detach "$DISK" >/dev/null
 attach
 python3 "$BENCH/datacheck.py" check "$dev" "$model"
 python3 "$BENCH/datacheck.py" run "$dev" "$model" "$OPS" 3
 mica disk detach "$DISK" >/dev/null
-mica disk delete "$DISK" -y >/dev/null
+mica disk delete "$DISK" >/dev/null
 echo DONE
 exit
 }

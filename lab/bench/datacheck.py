@@ -12,7 +12,7 @@ starts from <model file> if it exists, else from zeros (a new disk), and is
 saved there. `check` only reads the whole device, for example after a
 reattach, when the reads come from S3.
 
-A discard zeroes only the whole chunks it covers (CHUNK_KIB, default 256).
+A discard zeroes only the whole chunks it covers (CHUNK_KIB, default 1024).
 """
 import fcntl
 import mmap
@@ -23,7 +23,7 @@ import sys
 
 BLOCK = 4096
 MAX_IO = 1 << 20
-CHUNK = int(os.environ.get("CHUNK_KIB", "256")) << 10
+CHUNK = int(os.environ.get("CHUNK_KIB", "1024")) << 10
 BLKDISCARD = 0x1277
 BLKZEROOUT = 0x127F
 BLKGETSIZE64 = 0x80081272

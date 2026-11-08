@@ -25,7 +25,7 @@ sw() { # label args...
     shift
     echo "  $label: $(python3 "$BENCH/syncwrite.py" "$dev" "$@")"
 }
-settle() { mica disk checkpoint "$DISK" >/dev/null 2>&1 || sleep 200; }
+settle() { "$LAB/lab.sh" save "$DISK"; }
 
 echo "== flush on the host $(date -Is) | ${LABEL:-}"
 mica disk create "$DISK" --size 8G >/dev/null
@@ -39,7 +39,7 @@ sw "rewrite saved chunks, randwrite+fdatasync" 0 2048 15 rand
 sw "rewrite saved chunks, randwrite, no sync" 0 2048 15 rand --nosync
 settle
 mica disk detach "$DISK" >/dev/null
-mica disk delete "$DISK" -y >/dev/null
+mica disk delete "$DISK" >/dev/null
 echo DONE
 exit
 }

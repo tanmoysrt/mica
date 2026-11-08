@@ -59,9 +59,6 @@ for round in $(seq "$ROUNDS"); do
     sleep $((ROUND_SECS / 3))
     report "writing"
     echo "  probe, write+fdatasync: $(python3 "$BENCH/syncwrite.py" "/dev/mica/$PROBE" 0 256 10)"
-    started=$(date +%s.%N)
-    mica gc -y --grace 1h >/dev/null 2>&1 || echo "  gc failed"
-    printf '  gc: %.1f s\n' "$(echo "$(date +%s.%N) - $started" | bc)"
     if ((round % 3 == 0)); then
         started=$(date +%s.%N)
         "${ROOT[@]}" restart >/dev/null
@@ -89,9 +86,9 @@ done
 echo "  log: $(grep -c ' ERROR ' "$OUT/daemon.log") errors, $(grep -c ' WARN ' "$OUT/daemon.log") warnings"
 for i in $(seq "$DISKS"); do
     mica disk detach "$(name "$i")" >/dev/null
-    mica disk delete "$(name "$i")" -y >/dev/null
+    mica disk delete "$(name "$i")" >/dev/null
 done
-mica disk detach "$PROBE" >/dev/null; mica disk delete "$PROBE" -y >/dev/null
+mica disk detach "$PROBE" >/dev/null; mica disk delete "$PROBE" >/dev/null
 report "all detached"
 rm -rf "$OUT/work"
 echo "DONE: $failed failures"

@@ -5,7 +5,7 @@
 #   2. at a random time, every write to the data folder is lost from then on
 #   3. the writer and the daemon are killed, the ublk device deleted, and the
 #      data folder mounted again as the device had it: a reboot
-#   4. the daemon starts, uploads what the last run left, and detaches
+#   4. the daemon starts, serves the disk again, and a detach uploads all
 #   5. the disk is attached again and every block is checked
 #   bench/crash.sh <results folder>
 # RUNS, BLOCKS (4 KiB each), FS (btrfs, xfs or ext4), BASELINE (mica-<name>).
@@ -26,14 +26,15 @@ BLOCKS=${BLOCKS:-65536}
 DISK=lab-crash
 ROOT=(sudo -n /usr/local/sbin/mica-lab-root)
 IO=$LAB/crash/crashio.py
-mica() { "$REPO/target/release/mica" --config "$LAB/crash/config.toml" "$@"; }
+mica() { "${ROOT[@]}" crash-cli "$@"; }
+STORE=$LAB/crash/store.toml
 WORK=$OUT/work
 mkdir -p "$WORK"
 exec > >(tee -a "$OUT/crash.log") 2>&1
 
 wait_daemon() { until mica status >/dev/null 2>&1; do sleep 0.2; done; }
-# A restarted daemon uploads the data left by the last run, then detaches.
-wait_detached() { while mica status 2>/dev/null | grep -q "^$DISK "; do sleep 0.5; done; }
+# A restarted daemon serves the disk again with the data that the last run left.
+wait_attached() { until mica status --json 2>/dev/null | jq -e --arg d "$DISK" 'any(.disks[]; .disk == $d)' >/dev/null; do sleep 0.5; done; }
 attach() {
     mica disk attach "$DISK" >/dev/null
     "${ROOT[@]}" own "$DISK" >/dev/null
@@ -42,14 +43,16 @@ attach() {
 echo "== crash test $(date -Is) | ${MODE:-power} | ${FS:-btrfs} | ${BASELINE:-current build} | $RUNS runs, $((BLOCKS / 256)) MiB"
 "${ROOT[@]}" crash down >/dev/null 2>&1
 # A fresh bucket prefix each time: nothing left from an earlier test.
-sed -i "s/^prefix = .*/prefix = \"crash-$(date +%s)\"/" "$LAB/crash/config.toml"
+sed -i "s/^prefix = .*/prefix = \"crash-$(date +%s)\"/" "$STORE"
 "${ROOT[@]}" crash setup "${FS:-btrfs}" || exit 1
 "${ROOT[@]}" crash deploy ${BASELINE:-} || exit 1
 "${ROOT[@]}" crash start
 wait_daemon
+mica bucket add --store "$STORE" >/dev/null || exit 1
 mica disk detach "$DISK" >/dev/null 2>&1
-mica disk delete "$DISK" -y >/dev/null 2>&1
-mica disk create "$DISK" --size 1G >/dev/null || exit 1
+mica disk delete "$DISK" >/dev/null 2>&1
+# Short intervals, so that cuts often land in the middle of a transaction.
+mica disk create "$DISK" --size 1G --interval 3s >/dev/null || exit 1
 attach
 python3 "$IO" prefill "/dev/mica/$DISK" "$BLOCKS" "$WORK/state" || exit 1
 mica disk detach "$DISK" >/dev/null
@@ -93,7 +96,8 @@ for run in $(seq "$RUNS"); do
     started=$(date +%s.%N)
     "${ROOT[@]}" crash start
     wait_daemon
-    wait_detached
+    wait_attached
+    mica disk detach "$DISK" >/dev/null || { echo "run $run: detach failed"; failed=$((failed + 1)); }
     drained=$(echo "$(date +%s.%N) - $started" | bc)
     attach
     printf 'run %2d: cut after %2d s, %4.1f s to upload and detach, ' "$run" "$delay" "$drained"
@@ -103,7 +107,7 @@ for run in $(seq "$RUNS"); do
 done
 
 mica disk detach "$DISK" >/dev/null
-mica disk delete "$DISK" -y >/dev/null
+mica disk delete "$DISK" >/dev/null
 "${ROOT[@]}" crash down >/dev/null
 echo "DONE: $failed of $RUNS runs lost data"
 exit

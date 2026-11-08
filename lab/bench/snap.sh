@@ -27,11 +27,8 @@ exec > >(tee -a "$OUT/snap.log") 2>&1
 
 now() { date +%s.%N; }
 since() { printf "%.2f" "$(echo "$(now) - $1" | bc)"; }
-s3_in() { mica status | awk '/Data:/{print $2}'; }
-s3_in_mib() { # bytes downloaded so far, in MiB
-    echo '{"command":"status"}' | socat - UNIX-CONNECT:/run/mica-lab.sock | jq '.result.s3.bytes_in / 1048576 | floor'
-}
-cold() { mica cache prune -y >/dev/null; "${ROOT[@]}" drop-caches; }
+s3_in_mib() { "$LAB/lab.sh" s3 | cut -d' ' -f1; }
+cold() { for disk in "$@"; do "$LAB/lab.sh" cold "$disk" >/dev/null; done; }
 stop_vm() {
     [[ -f $RUN/pid ]] && kill "$(cat "$RUN/pid")" 2>/dev/null
     sleep 0.5
@@ -73,24 +70,23 @@ stop_vm
 mica disk detach "$SRC" >/dev/null
 sync -f "$MEMDIR"
 "${ROOT[@]}" umount "$MEM" >/dev/null
-t=$(now); before=$(echo '{"command":"status"}' | socat - UNIX-CONNECT:/run/mica-lab.sock | jq '.result.s3.bytes_out')
-mica disk detach "$MEM" >/dev/null
-after=$(echo '{"command":"status"}' | socat - UNIX-CONNECT:/run/mica-lab.sock | jq '.result.s3.bytes_out')
-echo "upload of the memory disk: $(since "$t") s, $(( (after - before) >> 20 )) MiB uploaded (memory file is 2048 MiB)"
+unsaved=$("$LAB/lab.sh" mica status --json | jq --arg d "$MEM" '.disks[] | select(.disk == $d) | .status.unsaved_bytes / 1048576 | floor')
+t=$(now); mica disk detach "$MEM" >/dev/null
+echo "upload of the memory disk: $(since "$t") s, $unsaved MiB unsaved before (memory file is 2048 MiB)"
 
 # 2. Restores.
 n=0
-restore() { # label ; env PREFETCH=<chunks>
+restore() { # label
     local label=$1 disk t0 in0
     n=$((n + 1))
     disk=$SRC-r$n
     in0=$(s3_in_mib)
     t0=$(now)
-    mica disk create "$disk" --from-snapshot "$SRC-base" >/dev/null
+    mica disk restore "$SRC" "$SRC-base" "$disk" >/dev/null
     mica disk attach "$disk" >/dev/null
     "${ROOT[@]}" own "$disk"
     ln -sfn "/dev/mica/$disk" "$RUN/root-drive"
-    if [[ -n ${PREFETCH:-} ]]; then mica disk attach "$MEM" --prefetch "$PREFETCH" >/dev/null; else mica disk attach "$MEM" >/dev/null; fi
+    mica disk attach "$MEM" >/dev/null
     "${ROOT[@]}" mount "$MEM" ext4 >/dev/null
     "${ROOT[@]}" tap up
     local t_attach
@@ -108,7 +104,7 @@ restore() { # label ; env PREFETCH=<chunks>
         "${ROOT[@]}" umount "$MEM" >/dev/null
         mica disk detach "$MEM" >/dev/null
         mica disk detach "$disk" >/dev/null
-        mica disk delete "$disk" -y >/dev/null
+        mica disk delete "$disk" >/dev/null
         return 1
     fi
     t_load=$(since "$t1")
@@ -122,16 +118,14 @@ restore() { # label ; env PREFETCH=<chunks>
     "${ROOT[@]}" umount "$MEM" >/dev/null
     mica disk detach "$MEM" >/dev/null
     mica disk detach "$disk" >/dev/null
-    mica disk delete "$disk" -y >/dev/null
+    mica disk delete "$disk" >/dev/null
 }
 
-cold; restore "File, cold cache"
+# The clone shares the cache of the node by hash, so a cold start drops both caches.
+cold "$SRC" "$MEM"; restore "File, cold cache"
 restore "File, warm cache"
-cold; PREFETCH=512 restore "File, cold cache + mica read-profile prefetch (512 chunks)"
-cold; t=$(now); mica disk warm "$MEM" >/dev/null; echo "disk warm of the memory disk: $(since "$t") s"
-restore "File, memory disk fully warmed first"
 
-mica status | tail -6
+mica status
 echo DONE
 exit
 }

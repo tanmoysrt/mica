@@ -27,8 +27,8 @@ CRASH_DIR=/var/lib/mica-lab-crash
 CRASH_IMAGE=/var/lib/mica-lab-crash.img
 CRASH_DM=mica-crash
 CRASH_LOOP_FILE=/run/mica-crash.loop
-# What a reboot clears: the session files that tell mica the page cache survived.
-CRASH_SESSIONS=/run/mica/sessions/var-lib-mica-lab-crash
+# What a reboot clears: the run folder of the crash daemon (recent bitmaps).
+CRASH_RUN=/run/mica-lab-crash
 
 die() { echo "mica-lab-root: $*" >&2; exit 1; }
 
@@ -95,6 +95,29 @@ set_limits() {
         "IOReadBandwidthMax=$rbw" "IOWriteBandwidthMax=$rbw" \
         "IOReadIOPSMax=$riops" "IOWriteIOPSMax=$riops"
     echo "limits on $device: $bw MiB/s, $iops IOPS (0 = no limit)"
+}
+
+# The mica CLI of a lab daemon, as root: the v2 socket is root only. Only
+# commands on disks: no service, daemon or other config.
+cli() { # binary config args...
+    local binary=$1 config=$2 arg
+    shift 2
+    for arg in "$@"; do
+        [[ $arg == service || $arg == daemon || $arg == --config* ]] && die "cli: $arg is not allowed"
+    done
+    exec "$binary" --config "$config" "$@"
+}
+
+# The node cache of a detached lab disk goes, for a cold read. The daemon
+# reads its cache index at start, so it restarts.
+drop_cache() {
+    local disk
+    disk=$(lab_disk "$1")
+    [[ -e $DATA_DIR/disks/$disk ]] && die "$disk is attached: detach it first"
+    systemctl stop $UNIT
+    rm -rf "${DATA_DIR:?}/cache/$disk"
+    systemctl start $UNIT
+    echo "dropped the cache of $disk"
 }
 
 mount_disk() {
@@ -206,7 +229,7 @@ crash_devices() {
     local state id
     for state in $CRASH_DIR/disks/*/state; do
         [[ -f $state ]] || continue
-        id=$(jq -r '.ublk_id // empty' "$state")
+        id=$(jq -r '.ublk // empty' "$state")
         [[ $id =~ ^[0-9]{1,4}$ ]] || continue
         [[ -e /dev/ublkc$id ]] || continue
         fuser -s "/dev/ublkc$id" 2>/dev/null && continue
@@ -224,7 +247,7 @@ crash_reboot() {
     for id in $(crash_devices); do
         if [[ -e /sys/class/ublk-char/ublkc$id ]]; then $CRASH_TOOL "$id"; fi
     done
-    rm -rf $CRASH_SESSIONS
+    rm -rf $CRASH_RUN
     for _ in $(seq 50); do umount $CRASH_DIR 2>/dev/null && break; sleep 0.2; done
     mountpoint -q $CRASH_DIR && die "cannot unmount $CRASH_DIR"
     crash_switch linear
@@ -249,7 +272,7 @@ crash_down() {
         for id in $(crash_devices); do $CRASH_TOOL "$id" || true; done
         umount $CRASH_DIR
     fi
-    rm -rf $CRASH_SESSIONS
+    rm -rf $CRASH_RUN
     if [[ -e /dev/mapper/$CRASH_DM ]]; then dmsetup remove $CRASH_DM; fi
     if [[ -f $CRASH_LOOP_FILE ]]; then losetup -d "$(cat $CRASH_LOOP_FILE)"; rm -f $CRASH_LOOP_FILE; fi
     rm -f $CRASH_IMAGE
@@ -280,6 +303,9 @@ case ${1:-} in
     mount) mount_disk "${2:-}" "${3:-}" ;;
     umount) umount_disk "${2:-}" ;;
     drop-caches) sync && echo 3 > /proc/sys/vm/drop_caches ;;
+    drop-cache) drop_cache "${2:-}" ;;
+    cli) shift; cli $BIN $CONFIG "$@" ;;
+    crash-cli) shift; cli $CRASH_BIN $CRASH_CONFIG "$@" ;;
     tap) tap "${2:-}" ;;
     crash) crash "${2:-}" "${3:-}" ;;
     *)
@@ -293,6 +319,9 @@ usage: mica-lab-root <verb>
   mount <lab-disk> [fs]   format if blank, mount at $MOUNT_ROOT/<disk>
   umount <lab-disk>       fstrim and unmount
   drop-caches             sync and drop the page cache
+  drop-cache <lab-disk>   delete the node cache of a detached disk (restarts the daemon)
+  cli <args>              the mica CLI against the lab daemon (no service, daemon, --config)
+  crash-cli <args>        the same against the crash daemon
   tap up|down             $TAP for the Firecracker VM ($TAP_ADDR)
   crash setup [fs]        a $CRASH_DM device (btrfs, xfs or ext4) at $CRASH_DIR, and $CRASH_UNIT
   crash deploy [base]     the current build (or a saved mica-<name> baseline) for the crash daemon

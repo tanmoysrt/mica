@@ -28,7 +28,7 @@ step() {
     "$@" > /tmp/mica-lab-step.out 2>&1 || { echo "FAILED: $label"; cat /tmp/mica-lab-step.out; exit 1; }
     echo "$label: $(since "$t") s"
 }
-s3_bytes() { mica status | awk '/Data:/{print $2, $4}'; }
+s3_bytes() { "$LAB/lab.sh" s3; }
 boot() { # label
     local before
     before=$(s3_bytes)
@@ -39,7 +39,7 @@ shutdown() { # label
     step "[$1] guest reboot (Firecracker exits)" "$LAB/lab.sh" fc-down
     step "[$1] detach (waits for the upload)" mica disk detach "$FC_DISK"
 }
-cold() { mica cache prune -y >/dev/null; "${ROOT[@]}" drop-caches; }
+cold() { "$LAB/lab.sh" cold "$FC_DISK" >/dev/null; }
 
 python3 "$BENCH/sampler.py" "$OUT/vm-samples.tsv" &
 sampler=$!
@@ -86,7 +86,7 @@ done
 shutdown "after cold reads"
 
 step "snapshot $FC_DISK" mica snapshot create "$FC_DISK" lab-fc-base
-step "clone from snapshot" mica disk create lab-fc-clone --from-snapshot lab-fc-base
+step "clone from snapshot" mica disk restore "$FC_DISK" lab-fc-base lab-fc-clone
 FC_DISK=lab-fc-clone boot "clone boot, cache shared with $FC_DISK"
 FC_DISK=lab-fc-clone step "[clone] guest: read + check all files, 8 readers" "$LAB/lab.sh" fc-ssh "python3 /root/verify.py check /data /root/hashes.txt 8"
 tail -1 /tmp/mica-lab-step.out

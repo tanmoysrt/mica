@@ -3,7 +3,7 @@
 A local test bench for mica. It has three parts:
 
 - **S3:** RustFS in Docker, behind a capped link. `lab.env` sets the download rate, the upload rate and the round trip. The shaper container applies them in the RustFS network namespace, so the host needs no root for this part.
-- **Lab daemon:** a second mica daemon, separate from the main `mica.service`. It has its own socket (`/run/mica-lab.sock`), its own data folder (`/var/lib/mica-lab`) and its own bucket. A cgroup `io.max` limit on `mica-lab.service` caps its local SSD (`DISK_MIBPS`, `DISK_IOPS`).
+- **Lab daemon:** a second mica daemon, separate from the main `mica.service`. It has its own socket (`/run/mica-lab.sock`), its own data folder (`/var/lib/mica-lab`) and its own bucket: `lab.sh up` gives it `store.toml` once. A cgroup `io.max` limit on `mica-lab.service` caps its local SSD (`DISK_MIBPS`, `DISK_IOPS`).
 - **VM:** Firecracker boots Ubuntu 24.04 (or Alpine 3.22 with `GUEST=alpine`) from a mica disk (`/dev/mica/lab-fc`, 100 GiB, thin). You reach it with `ssh` on `fc-tap0` (172.30.0.2). The VM has no internet access.
 
 ## One-time setup
@@ -28,6 +28,9 @@ lab/lab.sh fc-up              # boot the VM (IO_ENGINE=Async|Sync, VCPUS, MEM_MI
 lab/lab.sh fc-ssh fio --version
 lab/lab.sh fc-down
 lab/lab.sh mica status        # the mica CLI against the lab daemon
+lab/lab.sh save <disk>        # upload all changes of a disk now
+lab/lab.sh cold <disk>        # drop the node cache of a detached disk, and the page cache
+lab/lab.sh s3                 # MiB downloaded and uploaded by the attached disks
 lab/lab.sh shape              # apply new lab.env values live
 lab/lab.sh down
 ```
@@ -55,9 +58,12 @@ Each script writes a log to `lab/results/<date>-local/`, or to the folder you gi
 | `bench/vm.sh` | Firecracker: cold and warm boot, fio in the guest, a fill in the guest, cold reads, a clone |
 | `bench/snap.sh` | Firecracker memory snapshots on a mica disk, restored with the File backend: cold, warm, with prefetch |
 | `bench/suite.sh <folder>` | host, vm and snap, then vm with Alpine |
-| `bench/compare.sh <ms> <folder>` | The suite for v0.2 and for v0.1 at one round trip |
 | `bench/zerocopy.sh <folder>` | Daemon RSS and CPU per operation on 8 disks: 1 MiB and 4 KiB reads and writes of local chunks |
 | `bench/datacheck.sh <folder> [ops]` | Random I/O checked against a model of the disk: chunk borders, parts never written, FUA, discard, write-zeroes, cold reads after a reattach |
 | `bench/coldread.sh <folder>` | Cold reads from S3 at `RTT_MS` (default 20): 128 MiB sequential and 64 random 1 MiB reads, queue depth 1 |
+| `bench/crash.sh <folder>` | Power cuts of the data folder (`MODE=daemon`: kills of the daemon), then every block is checked |
+| `bench/dbwrites.sh <label> <tps> <inserts>` | The chunks that MariaDB changes in each upload interval, and their monthly request cost (`chunks.py`). Needs `fc/db-images.sh` and `bench/dbwrites.sh prepare` once. |
 
-To run a v0.1 build: `lab/lab.sh deploy <binary>` with `PREFIX=""`, and `SKIP_FILL=1 ATTACH_ARGS=" "` for the suite. The two versions use different formats, so they use different bucket prefixes.
+A cold read in v2 needs a detached disk without a node cache: `lab.sh cold <disk>` deletes the cache of that disk and restarts the lab daemon. The node cache finds chunks by hash, so a clone shares the cache of its source: drop both for a cold clone. v2 always downloads the read profile and fills the cache in the background, when no read waits.
+
+To run another build: `lab/lab.sh deploy <binary>`.

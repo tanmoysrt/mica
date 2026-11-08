@@ -1,24 +1,5 @@
-# mica crash-test daemon (lab/bench/crash.sh). Its data folder is a btrfs
-# on a device-mapper device that can drop all writes, like a power cut.
-# Short checkpoints, so that cuts often land in the middle of one.
+# mica crash-test daemon (lab/bench/crash.sh). Its data folder is a file
+# system on a device-mapper device that can drop all writes, like a power cut.
 socket = "/run/mica-crash.sock"
 data_dir = "/var/lib/mica-lab-crash"
-cache_limit_gib = 4
-dirty_limit_gib = 4
-checkpoint_interval_secs = 3
-checkpoint_after_mib = 16
-max_unsaved_minutes = 5
-wait_when_behind = false
-mount_roots = ["/mnt/mica-lab"]
-gc_keep_checkpoints = 5
-gc_grace_hours = 24
-memory_high = ""
-
-[s3]
-endpoint = "http://172.31.99.10:9000"
-bucket = "mica-lab"
-access_key_id = "micalab"
-secret_access_key = "micalab-secret"
-region = "us-east-1"
-prefix = "crash-1792926358"
-conditional_writes = true
+run_dir = "/run/mica-lab-crash"

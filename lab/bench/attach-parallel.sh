@@ -12,10 +12,10 @@ echo "== parallel attach of $* $(date -Is) | ${LABEL:-}"
 for round in 1 2 3; do
     start=$(date +%s%N)
     for disk in "$@"; do
-        echo "{\"command\":\"attach\",\"disk\":\"$disk\",\"force\":false}" | socat -t 60 - UNIX-CONNECT:/run/mica-lab.sock > "/tmp/mica-lab-pa-$disk" &
+        "$LAB/lab.sh" mica disk attach "$disk" > /dev/null 2> "/tmp/mica-lab-pa-$disk" &
     done
     wait
-    echo "round $round: all $# attached after $(( ($(date +%s%N) - start) / 1000000 )) ms; errors: $(cat /tmp/mica-lab-pa-* | jq -r 'select(.ok == false) | .error' | wc -l)"
+    echo "round $round: all $# attached after $(( ($(date +%s%N) - start) / 1000000 )) ms; errors: $(cat /tmp/mica-lab-pa-* | grep -c error)"
     for disk in "$@"; do "$LAB/lab.sh" mica disk detach "$disk" > /dev/null; done
 done
 exit

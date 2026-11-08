@@ -19,8 +19,8 @@ mkdir -p "$OUT"
 exec > >(tee -a "$OUT/coldread.log") 2>&1
 dev=/dev/mica/$DISK
 
-attach() { mica disk attach "$DISK" --prefetch 0 --no-fill >/dev/null && "${ROOT[@]}" own "$DISK" >/dev/null; }
-cold() { mica disk detach "$DISK" >/dev/null; mica cache prune -y >/dev/null; "${ROOT[@]}" drop-caches; attach; }
+attach() { mica disk attach "$DISK" >/dev/null && "${ROOT[@]}" own "$DISK" >/dev/null; }
+cold() { mica disk detach "$DISK" >/dev/null; "$LAB/lab.sh" cold "$DISK" >/dev/null; attach; }
 random_reads() {
     python3 - "$dev" <<'PY'
 import mmap, os, random, sys, time
@@ -35,7 +35,7 @@ print(f"{(time.monotonic() - start) / 64 * 1000:.0f} ms each")
 PY
 }
 
-trap 'mica disk detach "$DISK" >/dev/null 2>&1; mica disk delete "$DISK" -y >/dev/null 2>&1; RTT_MS= "$LAB/lab.sh" shape >/dev/null 2>&1' EXIT
+trap 'mica disk detach "$DISK" >/dev/null 2>&1; mica disk delete "$DISK" >/dev/null 2>&1; RTT_MS= "$LAB/lab.sh" shape >/dev/null 2>&1' EXIT
 RTT_MS=${RTT_MS:-20} "$LAB/lab.sh" shape >/dev/null
 echo "== cold reads at ${RTT_MS:-20} ms round trip, $(date -Is) | ${LABEL:-}"
 mica disk create "$DISK" --size 1G >/dev/null
