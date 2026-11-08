@@ -5,7 +5,6 @@
 //! its values comes from a flag, else from its `OBJECT_STORAGE_*` variable,
 //! else from the TOML file of `--store` or `/etc/mica/store.toml`.
 
-mod mount;
 mod output;
 pub mod service;
 
@@ -71,31 +70,14 @@ pub enum DiskCommand {
     },
     /// Save all data in the bucket, and give the disk free for other nodes.
     Detach { disk: String },
-    /// Attach, format a new disk, and mount it.
-    Mount {
+    /// Change the size or the limits of a disk. They follow the disk between nodes.
+    Set {
         disk: String,
-        path: PathBuf,
-        #[arg(long, default_value = "ext4")]
-        fs: String,
-        /// Take the disk from another node. Only when that node is off.
+        /// A larger size. Only for a detached disk.
         #[arg(long)]
-        force: bool,
-    },
-    /// Trim, unmount and detach. Takes a disk name or a mount path.
-    Unmount { target: String },
-    /// Upload the changes of an attached disk now.
-    Commit { disk: String },
-    /// Change the budgets of a disk. They follow the disk between nodes.
-    SetLimits {
-        disk: String,
+        size: Option<String>,
         #[command(flatten)]
         limits: LimitArgs,
-    },
-    /// Make a detached disk larger.
-    Resize {
-        disk: String,
-        #[arg(long)]
-        size: String,
     },
     /// Delete a disk and all its snapshots.
     Delete {
@@ -110,8 +92,6 @@ pub enum DiskCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum SnapshotCommand {
-    /// List the snapshots of a disk.
-    Ls { disk: String },
     /// Keep the current version of a disk under a name.
     Create { disk: String, name: String },
     /// Delete a snapshot. Its objects that no other version uses go.
@@ -191,10 +171,9 @@ impl LimitArgs {
 
 pub async fn run(cli: Cli, config: Config) -> Result<()> {
     let store = || cli.store.resolve();
-    let snapshots_only = matches!(cli.command, Command::Snapshot(_));
     let request = match cli.command {
         Command::Daemon => unreachable!("main runs the daemon"),
-        Command::Service(command) => return service::run(command, &cli.config, &cli.store),
+        Command::Service(command) => return service::run(command, &cli.config),
         Command::Status => Request::Status,
         Command::Disk(DiskCommand::Ls) => Request::List { store: store()? },
         Command::Disk(DiskCommand::Info { disk }) => Request::Info { store: store()?, disk },
@@ -207,26 +186,20 @@ pub async fn run(cli: Cli, config: Config) -> Result<()> {
         },
         Command::Disk(DiskCommand::Attach { disk, force }) => Request::Attach { store: store()?, disk, force },
         Command::Disk(DiskCommand::Detach { disk }) => Request::Detach { disk },
-        Command::Disk(DiskCommand::Mount { disk, path, fs, force }) => {
-            let attach = Request::Attach { store: store()?, disk, force };
-            return mount::mount(&config, attach, &path, &fs).await;
+        Command::Disk(DiskCommand::Set { disk, size, limits }) => {
+            Request::Set { store: store()?, disk, size: size.as_deref().map(parse_size).transpose()?, limits: limits.request()? }
         }
-        Command::Disk(DiskCommand::Unmount { target }) => return mount::unmount(&config, &target).await,
-        Command::Disk(DiskCommand::Commit { disk }) => Request::Commit { disk },
-        Command::Disk(DiskCommand::SetLimits { disk, limits }) => Request::SetLimits { store: store()?, disk, limits: limits.request()? },
-        Command::Disk(DiskCommand::Resize { disk, size }) => Request::Resize { store: store()?, disk, size: parse_size(&size)? },
         Command::Disk(DiskCommand::Delete { disk, force }) => Request::Delete { store: store()?, disk, force },
         Command::Disk(DiskCommand::Restore { disk, snapshot, new_disk }) => {
             Request::Restore { store: store()?, disk, snapshot, target: new_disk }
         }
-        Command::Snapshot(SnapshotCommand::Ls { disk }) => Request::Info { store: store()?, disk },
         Command::Snapshot(SnapshotCommand::Create { disk, name }) => Request::SnapshotCreate { store: store()?, disk, snapshot: name },
         Command::Snapshot(SnapshotCommand::Delete { disk, name }) => Request::SnapshotDelete { store: store()?, disk, snapshot: name },
     };
     let result: Value = call(&config.socket, &request).await?;
     match cli.json {
         true => println!("{}", serde_json::to_string_pretty(&result)?),
-        false => output::print(&request, &result, snapshots_only),
+        false => output::print(&request, &result),
     }
     Ok(())
 }

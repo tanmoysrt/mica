@@ -29,9 +29,7 @@ pub enum Request {
     Create { store: StoreConfig, disk: String, size: u64, chunk_size: Option<u64>, limits: LimitsRequest },
     Attach { store: StoreConfig, disk: String, force: bool },
     Detach { disk: String },
-    Commit { disk: String },
-    SetLimits { store: StoreConfig, disk: String, limits: LimitsRequest },
-    Resize { store: StoreConfig, disk: String, size: u64 },
+    Set { store: StoreConfig, disk: String, size: Option<u64>, limits: LimitsRequest },
     Delete { store: StoreConfig, disk: String, force: bool },
     SnapshotCreate { store: StoreConfig, disk: String, snapshot: String },
     SnapshotDelete { store: StoreConfig, disk: String, snapshot: String },
@@ -86,9 +84,7 @@ async fn run(daemon: &Arc<Daemon>, request: Request) -> Result<Value> {
         Request::Create { store, disk, size, chunk_size, limits } => daemon.create(&store, &disk, size, chunk_size, limits).await,
         Request::Attach { store, disk, force } => daemon.attach(&store, &disk, force).await,
         Request::Detach { disk } => daemon.detach(&disk).await,
-        Request::Commit { disk } => daemon.commit(&disk).await,
-        Request::SetLimits { store, disk, limits } => daemon.set_limits(&store, &disk, limits).await,
-        Request::Resize { store, disk, size } => daemon.resize(&store, &disk, size).await,
+        Request::Set { store, disk, size, limits } => daemon.set(&store, &disk, size, limits).await,
         Request::Delete { store, disk, force } => daemon.delete(&store, &disk, force).await,
         Request::SnapshotCreate { store, disk, snapshot } => daemon.create_snapshot(&store, &disk, &snapshot).await,
         Request::SnapshotDelete { store, disk, snapshot } => daemon.delete_snapshot(&store, &disk, &snapshot).await,
@@ -116,7 +112,7 @@ pub async fn call(socket: &Path, request: &Request) -> Result<Value> {
 
 /// Tells systemd that the daemon answers on its socket (`Type=notify`). So
 /// `systemctl start mica` returns only then, and units after mica.service,
-/// such as the mounts of `service add-disk`, find the daemon ready.
+/// such as fstab mounts of mica disks, find the devices ready.
 fn notify_ready() {
     use std::os::linux::net::SocketAddrExt;
     use std::os::unix::net::{SocketAddr, UnixDatagram};

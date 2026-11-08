@@ -18,7 +18,8 @@ but the bucket.
   makes a new disk from it, copied inside the bucket.
 - **A data disk for a VM.** Give `/dev/mica/<name>` to Firecracker, QEMU or
   a container, or mount it on the host.
-- **A large disk for a laptop.** Mount it at each boot, and use it with no sudo.
+- **A large disk for a laptop.** mica attaches it at each boot, and fstab
+  mounts it. Use it with no sudo.
 
 ## Quick start
 
@@ -34,19 +35,21 @@ sudo mica service install
 sudo cp store.example.toml /etc/mica/store.toml   # then fill in the bucket
 sudo chmod 600 /etc/mica/store.toml
 sudo mica disk create data-1 --size 20G
-sudo mica disk mount data-1 /mnt/data-1
+sudo mica disk attach data-1                      # makes /dev/mica/data-1
+sudo mkfs.ext4 /dev/mica/data-1
+sudo mkdir -p /mnt/data-1 && sudo mount -o discard /dev/mica/data-1 /mnt/data-1
 echo hello | sudo tee /mnt/data-1/hello.txt
-sudo mica disk unmount data-1
+sudo umount /mnt/data-1 && sudo mica disk detach data-1
 ```
 
+`detach` returns when the bucket has all data, so the disk is ready to move.
 On another machine with the same `/etc/mica/store.toml`:
 
 ```bash
-sudo mica disk mount data-1 /mnt/data-1
+sudo mica disk attach data-1
+sudo mount -o discard /dev/mica/data-1 /mnt/data-1
 cat /mnt/data-1/hello.txt
 ```
-
-`unmount` returns when the bucket has all data, so the disk is ready to move.
 
 ## Documentation
 

@@ -42,7 +42,7 @@ const RETRY: Duration = Duration::from_secs(5);
 pub enum Kind {
     /// From the timer or the unsaved limit.
     Background,
-    /// Takes all unsaved chunks: detach, snapshot, `mica disk commit`.
+    /// Takes all unsaved chunks: detach, snapshot, and the last transaction at exit.
     All,
 }
 

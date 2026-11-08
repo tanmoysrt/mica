@@ -2,16 +2,15 @@
 //!
 //! ```text
 //! <data folder>/disks/<disk>/state         attached or orphaned, and the ublk device number
+//! <data folder>/disks/<disk>/store.toml    the bucket credentials of the disk, root only
 //! <data folder>/disks/<disk>/data          the data file
 //! <data folder>/disks/<disk>/log-a, log-b  the dirty log
-//! /run/mica/disks/<disk>/store.toml        the bucket credentials of the disk
 //! /run/mica/disks/<disk>/recent            the recent bitmap
 //! ```
 //!
-//! The credentials stay in `/run`, readable by root only. They survive a
-//! restart of mica, so the new daemon can serve the disk again. A reboot
-//! deletes them: then the next `mica disk attach` gives them again, and
-//! the disk goes on from its local data.
+//! The credentials stay while the node holds the disk, so after a restart
+//! or a reboot the daemon serves the disk again by itself. A detach
+//! deletes the folder and the credentials with it.
 
 use crate::store::StoreConfig;
 use anyhow::{Context, Result, ensure};
@@ -109,19 +108,17 @@ impl DiskFolder {
         self.write_state(old.state, ublk, &old.disk_id)
     }
 
-    /// Keeps the credentials for a restart of mica. Root only.
+    /// Keeps the credentials for a restart of mica or of the node.
     pub fn save_store(&self, store: &StoreConfig) -> Result<()> {
-        std::fs::create_dir_all(&self.run)?;
-        let path = self.run.join("store.toml");
+        let path = self.path.join("store.toml");
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create(true).truncate(true).mode(0o600);
         std::io::Write::write_all(&mut options.open(&path)?, toml::to_string(store)?.as_bytes())?;
         Ok(())
     }
 
-    /// `None` after a reboot.
     pub fn saved_store(&self) -> Option<StoreConfig> {
-        StoreConfig::read(&self.run.join("store.toml")).ok()
+        StoreConfig::read(&self.path.join("store.toml")).ok()
     }
 
     /// Deletes all local data of the disk. The cache stays.

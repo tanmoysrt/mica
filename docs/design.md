@@ -31,7 +31,7 @@ the words of the sections before it.
 ## Words
 
 - **Chunk.** The disk is a row of chunks of the same size: 64 KiB to 4 MiB,
-  256 KiB by default. A chunk is the unit of upload and download.
+  1 MiB by default. A chunk is the unit of upload and download.
 - **Entry.** The name of the stored content of one chunk: a birth (the
   transaction that wrote it) and the SHA-256 of its content. Birth 0 is the
   zero entry: a chunk of zeros. Zero chunks are never stored.
@@ -246,8 +246,7 @@ the old disk does not touch it.
 
 ## Moving a disk
 
-**Detach** (or `mica disk unmount`, which first runs `fstrim` and
-`umount`):
+**Detach**:
 
 1. Refuse when a program still has the device open.
 2. Remove the device.
@@ -259,8 +258,7 @@ When detach returns, the bucket has all data, and any node can attach the
 disk.
 
 **Attach** claims the disk, opens its local data, and makes the device. A
-disk that was never written has `"blank": true`, and `mica disk mount`
-formats it.
+disk that was never written has `"blank": true`: it needs a filesystem.
 
 The local folder records the `id` of its disk and the version of its file
 layout. A mica of another layout refuses the folder. An attach also
@@ -274,7 +272,7 @@ bucket, or one that was deleted and made again. It keeps such data as
 |---|---|
 | The daemon stops (`systemctl restart mica`) | Each device stays in the kernel, paused. The daemon runs one last transaction and exits. The next daemon takes each device over with ublk user recovery. The guest sees a pause of about one second. |
 | The daemon crashes | Same, without the last transaction. The kernel sends the requests in flight again to the next daemon. The recent bitmap keeps the chunks written since the last flush. |
-| The node reboots | The devices and `/run` are gone. The local data stays. The next `mica disk attach` (or a mount at boot) goes on from it. |
+| The node reboots | The devices and `/run` are gone. The local data and the credentials stay. At start, the daemon claims each disk again and makes a new device. It retries while the bucket cannot be reached. The local data becomes orphaned only when the head names another owner, or the disk is gone. |
 | Power loss | Same as a reboot. Writes after the last flush can be lost, as on any disk with a write cache. The dirty log makes sure that no torn data comes back. |
 | The bucket is down | Reads of local and cached data work. Writes go on until the unsaved data reaches its limit, then wait. Transactions retry. |
 | Another node takes the disk | The old owner fails its next head write, stops the disk, and keeps its local data as orphaned. |
@@ -297,7 +295,7 @@ changes are on the local SSD. Only the loss of the node loses them.
 The cache budget also limits the saved chunks in the data file. So a disk
 uses at most `unsaved_bytes + 2 × cache_bytes` of the local SSD.
 
-`mica disk create` sets them, and `mica disk set-limits` changes them. A
+`mica disk create` sets them, and `mica disk set` changes them. A
 disk is **behind** when its oldest unsaved write is older than three
 intervals.
 
@@ -305,12 +303,10 @@ intervals.
 
 Each request that needs the bucket carries its credentials. The CLI takes
 each value from a flag, else from an `OBJECT_STORAGE_*` variable, else from
-the file of `--store` or `/etc/mica/store.toml`. The daemon keeps the credentials
-of an attached disk in memory and in `/run/mica/disks/<disk>/store.toml`,
-mode 0600, for a restart of the daemon. A reboot removes them.
-
-For a laptop or a desktop, `mica service add-disk` keeps the file in
-`/etc/mica/disks/<disk>.toml` and mounts the disk at each boot.
+the file of `--store` or `/etc/mica/store.toml`. The daemon keeps the
+credentials of an attached disk in memory and in
+`/var/lib/mica/disks/<disk>/store.toml`, mode 0600. So it serves the disk
+again after a restart or a reboot. A detach deletes them with the folder.
 
 ## The code
 
@@ -330,4 +326,4 @@ For a laptop or a desktop, `mica service add-disk` keeps the file in
 | `disk/` | The engine of an attached disk: I/O, transactions, prefetch |
 | `ublk/` | The block device, its queue threads, and the zero-copy requests |
 | `daemon/` | The daemon, its operations, and its API |
-| `cli/` | The `mica` command, mount and unmount, the systemd units |
+| `cli/` | The `mica` command and the systemd unit |

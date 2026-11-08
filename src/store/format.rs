@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 pub const CHUNKS_PER_PAGE: usize = 1024;
 pub const MIN_CHUNK_SIZE: u64 = 64 << 10;
 pub const MAX_CHUNK_SIZE: u64 = 4 << 20;
-pub const DEFAULT_CHUNK_SIZE: u64 = 256 << 10;
+pub const DEFAULT_CHUNK_SIZE: u64 = 1 << 20;
 
 const ENTRY_BYTES: usize = 40;
 const PAGE_MAGIC: &[u8; 4] = b"MPAG";
@@ -221,7 +221,7 @@ mod tests {
         assert_eq!(Page::unpack(&packed, &hash).unwrap(), page);
         assert!(Page::unpack(&packed, &Hash::of(b"other")).is_err());
 
-        let mut root = Root::empty(DEFAULT_CHUNK_SIZE, 1 << 30);
+        let mut root = Root::empty(256 << 10, 1 << 30);
         root.pages[2] = Entry { birth: 42, hash };
         root.transaction = 42;
         root.parent = 41;

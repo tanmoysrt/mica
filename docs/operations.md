@@ -49,34 +49,41 @@ Do not give the secret key as a flag on a shared machine: other users see
 the flags of a process in `ps`.
 
 Two disks can use two buckets with two sets of credentials. The daemon
-keeps the credentials of an attached disk only in memory and in `/run`.
+keeps the credentials of an attached disk in its folder,
+`/var/lib/mica/disks/<disk>/store.toml`, root only. A detach deletes them.
 
 ## Use a disk
 
 ```bash
-sudo mica disk create photos --size 500G      # no space is used until it is written
-sudo mica disk mount photos /mnt/photos       # attach, format when new, mount
-sudo mica status
-sudo mica disk unmount photos                 # trim, unmount, upload all, detach
+sudo mica disk create data --size 500G      # no space is used until it is written
+sudo mica disk attach data                  # makes /dev/mica/data
+sudo mkfs.ext4 /dev/mica/data               # only for a new disk
+sudo mount -o discard /dev/mica/data /mnt/data
 ```
 
-On another node with the same bucket file:
+Mount with `discard`: then the bucket also deletes the data of deleted
+files. To move the disk to another node, unmount it and detach it:
 
 ```bash
-sudo mica disk mount photos /mnt/photos
+sudo umount /mnt/data
+sudo mica disk detach data                  # returns when the bucket has all data
 ```
 
-For a VM, attach the disk and give the device to the VM:
+On the other node, `mica disk attach data` and `mount` again.
+
+For a VM, give the device to the VM, and do not mount it on the host:
 
 ```bash
-sudo mica disk attach vm-data                 # makes /dev/mica/vm-data
+sudo mica disk attach vm-data
 firecracker ...  # drive path_on_host = /dev/mica/vm-data
-sudo mica disk detach vm-data                 # after the VM stops
+sudo mica disk detach vm-data               # after the VM stops
 ```
 
 The main use is a data disk: the VM boots from a local root disk, and the
 mica disk holds its data, such as a database. A VM can also boot from a
 mica disk.
+
+`mica disk detach` refuses a disk that is mounted or open.
 
 ### Commands
 
@@ -85,33 +92,28 @@ mica disk.
 | `mica status` | The disks attached on this node, their unsaved data and cache |
 | `mica disk ls` | The disks in the bucket |
 | `mica disk info <disk>` | One disk, its limits and snapshots |
-| `mica disk create <disk> --size 20G [--chunk-size 256K] [--cache-size 512M] [--unsaved-size 4G] [--interval 5m]` | A new, empty disk |
-| `mica disk attach <disk> [--force]` | Makes `/dev/mica/<disk>` |
-| `mica disk mount <disk> <path> [--fs ext4] [--force]` | Attach, format when new, mount |
-| `mica disk unmount <disk or path>` | Trim, unmount, detach |
-| `mica disk detach <disk>` | Upload all data and give the disk free |
-| `mica disk commit <disk>` | Run a transaction now |
-| `mica disk set-limits <disk> [--cache-size] [--unsaved-size] [--interval]` | New limits, kept in the head |
-| `mica disk resize <disk> --size 40G` | A larger disk (detached only) |
+| `mica disk create <disk> --size 20G [--chunk-size 1M] [--cache-size 512M] [--unsaved-size 4G] [--interval 5m]` | A new, empty disk |
+| `mica disk attach <disk> [--force]` | Makes `/dev/mica/<disk>`. `--force` takes the disk from a node that is off. |
+| `mica disk detach <disk>` | Uploads all data and gives the disk free |
+| `mica disk set <disk> [--size] [--cache-size] [--unsaved-size] [--interval]` | New limits, or a larger size (detached only) |
 | `mica disk restore <disk> <snapshot> <new disk>` | A new disk from a snapshot |
-| `mica disk delete <disk>` | Delete the disk and its snapshots |
-| `mica snapshot ls / create / delete <disk> <name>` | Snapshots |
-| `mica service install / uninstall` | The systemd unit `mica.service` |
-| `mica service add-disk <disk> <path>` / `remove-disk <disk>` | Mount a disk at each boot |
+| `mica disk delete <disk> [--force]` | Deletes the disk and its snapshots |
+| `mica snapshot create / delete <disk> <name>` | Snapshots. A create uploads all changes first. |
+| `mica service install / uninstall / status` | The systemd unit `mica.service` |
 
 `--json` prints the answer of the daemon as JSON. `mica status --json`
 also shows the requests and bytes of each disk since its attach.
 
 ### Choose the chunk size
 
-The chunk size is fixed when the disk is made.
+The chunk size is fixed when the disk is made. A transaction uploads each
+changed chunk, so the chunk size sets the number of requests.
 
-- **256 KiB** (the default) suits most disks: files, boot disks, mixed use.
-- **64 KiB** suits databases with random writes. A write into a chunk that
-  is not local first copies the whole chunk, so small chunks copy less and
-  upload less.
-- **1 MiB to 4 MiB** suits large files that are read and written in order,
-  such as video or backups. Fewer chunks mean fewer requests.
+- **1 MiB** (the default) suits most disks: files, databases, boot disks.
+- **4 MiB** suits large files, such as photos, video and backups. Fewer
+  chunks mean fewer requests.
+- **256 KiB or less** makes cold random reads cheaper, but a busy disk
+  makes more requests.
 
 ## A disk on a laptop or a desktop
 
@@ -120,19 +122,20 @@ needed once, to set it up:
 
 ```bash
 sudo mica service install
-sudo mica --store ~/photos.toml disk create photos --size 1T --cache-size 20G
-sudo mica --store ~/photos.toml service add-disk photos ~/photos
+sudo mica disk create photos --size 1T --chunk-size 4M --cache-size 20G
+sudo mica disk attach photos
+sudo mkfs.ext4 /dev/mica/photos
+echo "/dev/mica/photos $HOME/photos ext4 discard,nofail,x-systemd.requires=mica.service 0 0" | sudo tee -a /etc/fstab
+mkdir -p ~/photos && sudo mount ~/photos && sudo chown "$USER:" ~/photos
 ```
 
-`add-disk` copies the bucket file to `/etc/mica/disks/photos.toml` (root
-only) and writes `mica-disk-photos.service`. The disk mounts at `~/photos`
-at each boot, and the folder belongs to you. After that, use `~/photos`
-with no sudo.
+After that, use `~/photos` with no sudo. At each boot, mica attaches the
+disk again before systemd mounts it.
 
-At shutdown, the unit only unmounts. The daemon runs a last transaction,
-and the local data stays on the laptop. So a shutdown never waits for a
-full upload, and the next boot goes on from the local data. Give the disk
-a large cache, so that most reads stay local when the laptop is offline.
+At shutdown, systemd unmounts the disk, and mica runs a last transaction.
+The local data stays on the laptop. So a shutdown never waits for a full
+upload, and the next boot goes on from the local data. Give the disk a
+large cache, so that most reads stay local when the laptop is offline.
 Without a network, reads of data that is not local fail, and writes wait
 when the unsaved data reaches its limit.
 
@@ -143,8 +146,9 @@ systems mounted. Each device pauses for about a second. Use it to upgrade
 mica: replace the binary, then restart.
 
 After a crash, systemd starts mica again, and mica takes the devices over.
-After a reboot, the local data stays. Attach or mount the disk again, or
-let `add-disk` do it.
+After a reboot, mica attaches each disk that the node held again. When the
+bucket cannot be reached at boot, mica tries again every 10 seconds. A
+mount with `nofail` does not stop the boot: mount it when the disk is back.
 
 ## When something goes wrong
 
@@ -157,5 +161,6 @@ let `add-disk` do it.
 | `this store cannot hold mica disks` | The bucket ignores conditional writes | Use another bucket or provider. |
 | `upload is behind` in `mica status` | Unsaved data missed three transactions | Check the network and the bucket. Writes wait at the unsaved limit. |
 | `stopped: a local sync failed` | The local SSD failed a write | The disk refuses I/O. Check the SSD. |
+| `not served yet, tried again` in the log | At start, the bucket could not be reached | mica tries again every 10 seconds. Check the network. |
 
 `journalctl -u mica -f` shows the log of the daemon.

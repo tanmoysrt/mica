@@ -58,13 +58,6 @@ impl Daemon {
         Ok(describe(name, &disk.require_head().await?.head))
     }
 
-    /// Uploads the local changes of an attached disk now.
-    pub async fn commit(&self, name: &str) -> Result<Value> {
-        let Some(disk) = self.attached(name).await else { bail!("disk {name} is not attached on this node") };
-        let transaction = disk.transaction(TransactionKind::All, None).await?;
-        Ok(json!({ "disk": name, "transaction": transaction, "unsaved_bytes": disk.status().unsaved_bytes }))
-    }
-
     /// Takes a snapshot. On an attached disk, it is a transaction of all
     /// unsaved chunks whose head write also adds the name.
     pub async fn create_snapshot(&self, store: &StoreConfig, name: &str, snapshot: &str) -> Result<Value> {
@@ -93,34 +86,31 @@ impl Daemon {
         Ok(json!({ "disk": name, "deleted": snapshot }))
     }
 
-    pub async fn set_limits(&self, store: &StoreConfig, name: &str, request: LimitsRequest) -> Result<Value> {
-        let limits = self
+    /// Changes the limits, and makes the disk larger. A new size needs a
+    /// detached disk: grow its filesystem after the next attach.
+    pub async fn set(&self, store: &StoreConfig, name: &str, size: Option<u64>, request: LimitsRequest) -> Result<Value> {
+        if size.is_some() && self.attached(name).await.is_some() {
+            bail!("disk {name} is attached: detach it before a new size");
+        }
+        let head = self
             .with_claim(store, name, async |claim| {
-                let limits = request.apply(claim.head().limits, claim.head().chunk_size)?;
-                claim.update(|head| head.limits = limits).await?;
-                Ok(limits)
+                let old = claim.head().clone();
+                let limits = request.apply(old.limits, old.chunk_size)?;
+                let size = size.map_or(old.size, |size| size.next_multiple_of(old.chunk_size));
+                ensure!(size >= old.size, "a disk cannot become smaller");
+                claim
+                    .update(|head| {
+                        head.limits = limits;
+                        head.size = size;
+                    })
+                    .await?;
+                Ok(claim.head().clone())
             })
             .await?;
         if let Some(disk) = self.attached(name).await {
-            disk.set_limits(limits);
+            disk.set_limits(head.limits);
         }
-        Ok(json!({ "disk": name, "limits": limits }))
-    }
-
-    /// Makes a detached disk larger. Grow the filesystem after the next attach.
-    pub async fn resize(&self, store: &StoreConfig, name: &str, size: u64) -> Result<Value> {
-        if self.attached(name).await.is_some() {
-            bail!("disk {name} is attached: detach it first");
-        }
-        let size = self
-            .with_claim(store, name, async |claim| {
-                let size = size.next_multiple_of(claim.head().chunk_size);
-                ensure!(size >= claim.head().size, "a disk cannot become smaller");
-                claim.update(|head| head.size = size).await?;
-                Ok(size)
-            })
-            .await?;
-        Ok(json!({ "disk": name, "size": size }))
+        Ok(describe(name, &head))
     }
 
     /// Makes the new disk `target` from a snapshot of `name`.

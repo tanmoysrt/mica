@@ -209,7 +209,7 @@ impl Disk {
         (self.size / self.chunk_size) as usize
     }
 
-    /// True for a disk that was never written: `mica disk mount` formats it.
+    /// True for a disk that was never written: it needs a filesystem.
     pub fn is_blank(&self) -> bool {
         self.version.load(Ordering::SeqCst) == 0 && self.unsaved.lock().unwrap().is_empty()
     }

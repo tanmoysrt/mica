@@ -4,7 +4,7 @@ use crate::config::format_size;
 use crate::daemon::api::Request;
 use serde_json::Value;
 
-pub fn print(request: &Request, result: &Value, snapshots_only: bool) {
+pub fn print(request: &Request, result: &Value) {
     let size = |value: &Value| format_size(value.as_u64().unwrap_or(0));
     match request {
         Request::Status => {
@@ -30,39 +30,39 @@ pub fn print(request: &Request, result: &Value, snapshots_only: bool) {
             table(&["DISK", "SIZE", "ATTACHED ON", "SNAPSHOTS", "LAST TRANSACTION"], rows);
         }
         Request::Info { .. } => {
-            if !snapshots_only {
-                println!("Disk:          {}", text(&result["disk"]));
-                println!("Size:          {} in chunks of {}", size(&result["size"]), size(&result["chunk_size"]));
-                println!("Attached on:   {}", result["owner"].as_str().unwrap_or("-"));
-                println!("Transaction:   {} ({})", result["transaction"], ago(&result["time"]));
-                println!("Cache budget:  {}", size(&result["limits"]["cache_bytes"]));
-                println!("Unsaved limit: {}", size(&result["limits"]["unsaved_bytes"]));
-                println!("Interval:      {}", interval(&result["limits"]["interval_seconds"]));
-                println!();
-            }
+            println!("Disk:          {}", text(&result["disk"]));
+            println!("Size:          {} in chunks of {}", size(&result["size"]), size(&result["chunk_size"]));
+            println!("Attached on:   {}", result["owner"].as_str().unwrap_or("-"));
+            println!("Transaction:   {} ({})", result["transaction"], ago(&result["time"]));
+            println!("Cache budget:  {}", size(&result["limits"]["cache_bytes"]));
+            println!("Unsaved limit: {}", size(&result["limits"]["unsaved_bytes"]));
+            println!("Interval:      {}", interval(&result["limits"]["interval_seconds"]));
+            println!();
             let rows = rows(&result["snapshots"], |snapshot| {
                 let name = text(&snapshot["name"]) + if snapshot["deleting"].as_bool() == Some(true) { " (deleting)" } else { "" };
                 vec![name, snapshot["transaction"].to_string(), ago(&snapshot["time"])]
             });
             table(&["SNAPSHOT", "TRANSACTION", "TAKEN"], rows);
         }
-        Request::Attach { disk, .. } => println!("Attached disk {disk} as {}", text(&result["device"])),
-        Request::Detach { disk } => println!("Detached disk {disk}. The bucket has all its data"),
-        Request::Commit { disk } => {
-            println!("Saved disk {disk} as transaction {}. Unsaved now: {}", result["transaction"], size(&result["unsaved_bytes"]))
+        Request::Attach { disk, .. } => {
+            println!("Attached disk {disk} as {}", text(&result["device"]));
+            if result["blank"].as_bool() == Some(true) {
+                println!("The disk is new: make a filesystem on it, such as `mkfs.ext4 {}`", text(&result["device"]));
+            }
         }
+        Request::Detach { disk } => println!("Detached disk {disk}. The bucket has all its data"),
         Request::Create { disk, .. } => println!("Made disk {disk}: {}", size(&result["size"])),
         Request::Restore { target, .. } => println!("Made disk {target} from the snapshot: {} objects copied", result["copied_objects"]),
         Request::SnapshotCreate { disk, snapshot, .. } => println!("Took snapshot {snapshot} of disk {disk} at transaction {}", result["transaction"]),
         Request::SnapshotDelete { snapshot, .. } => println!("Deleted snapshot {snapshot}"),
         Request::Delete { disk, .. } => println!("Deleted disk {disk}"),
-        Request::SetLimits { disk, .. } => println!(
-            "Disk {disk}: cache budget {}, unsaved limit {}, interval {}",
+        Request::Set { disk, .. } => println!(
+            "Disk {disk}: size {}, cache budget {}, unsaved limit {}, interval {}",
+            size(&result["size"]),
             size(&result["limits"]["cache_bytes"]),
             size(&result["limits"]["unsaved_bytes"]),
             interval(&result["limits"]["interval_seconds"])
         ),
-        Request::Resize { disk, .. } => println!("Disk {disk} is now {}. Grow its filesystem after the next attach", size(&result["size"])),
     }
 }
 
