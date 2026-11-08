@@ -12,6 +12,11 @@
 //!
 //! Restart: mica keeps each device paused when it exits. The next daemon
 //! takes it over with the credentials in `/run`. The guest sees a pause.
+//!
+//! One daemon only on a data folder: the daemon locks it, and its run folder,
+//! before it reads them. Two daemons on one folder would punch out the
+//! chunks of each other. A stopped daemon can still run its last
+//! transactions, so the next daemon must wait for its exit.
 
 pub mod api;
 mod operations;
@@ -26,6 +31,8 @@ use crate::ublk::{UblkDevice, device};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::fs::File;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -41,6 +48,8 @@ pub struct Daemon {
     disks: Mutex<HashMap<String, Attached>>,
     /// One attach or detach of each disk at a time.
     locks: std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Held until the process exits.
+    _folder_locks: [File; 2],
 }
 
 struct Attached {
@@ -52,7 +61,7 @@ struct Attached {
 
 impl Daemon {
     pub async fn start(config: Config) -> Result<Arc<Self>> {
-        std::fs::create_dir_all(&config.data_dir)?;
+        let folder_locks = [lock_folder(&config.data_dir)?, lock_folder(&config.run_dir)?];
         let daemon = Arc::new(Self {
             node: NodeId::load(&config.data_dir)?,
             cache: NodeCache::load(config.data_dir.join("cache"))?,
@@ -60,6 +69,7 @@ impl Daemon {
             config,
             disks: Mutex::default(),
             locks: Default::default(),
+            _folder_locks: folder_locks,
         });
         log::info!("node {} ({})", daemon.node.hostname, daemon.node.id);
         daemon.recover().await;
@@ -280,4 +290,12 @@ fn check_folder(folder: &DiskFolder, claim: &Claim) -> Result<()> {
         bail!("the local data in {} is of another disk {}: it is kept as orphaned", folder.path.display(), folder.disk);
     }
     Ok(())
+}
+
+/// Makes the folder and locks it for this process.
+fn lock_folder(folder: &Path) -> Result<File> {
+    std::fs::create_dir_all(folder).with_context(|| format!("create {}", folder.display()))?;
+    let file = File::create(folder.join("daemon.lock"))?;
+    file.try_lock().map_err(|_| anyhow::anyhow!("another mica daemon uses {}", folder.display()))?;
+    Ok(file)
 }

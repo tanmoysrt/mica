@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! <data folder>/disks/<disk>/state         attached or orphaned, and the ublk device number
-//! <data folder>/disks/<disk>/data-<n>      the data files
+//! <data folder>/disks/<disk>/data          the data file
 //! <data folder>/disks/<disk>/log-a, log-b  the dirty log
 //! /run/mica/disks/<disk>/store.toml        the bucket credentials of the disk
 //! /run/mica/disks/<disk>/recent            the recent bitmap
@@ -14,11 +14,15 @@
 //! the disk goes on from its local data.
 
 use crate::store::StoreConfig;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+
+/// The version of the files in a folder. A mica that reads files of
+/// another layout would see holes where the data is, so it refuses them.
+const LAYOUT: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -31,6 +35,7 @@ pub enum LocalState {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct StateFile {
+    layout: u32,
     state: LocalState,
     ublk: Option<i32>,
     /// The `id` of the head. A disk with the same name from another bucket,
@@ -131,14 +136,16 @@ impl DiskFolder {
     fn read_state(&self) -> Result<StateFile> {
         let path = self.path.join("state");
         let text = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        Ok(serde_json::from_str(&text)?)
+        let file: StateFile = serde_json::from_str(&text).with_context(|| format!("read {}: another mica made it", path.display()))?;
+        ensure!(file.layout == LAYOUT, "{} has layout {}, and this mica reads only layout {LAYOUT}", path.display(), file.layout);
+        Ok(file)
     }
 
     /// A new file, synced, then renamed into place: a crash leaves the old or the new state.
     fn write_state(&self, state: LocalState, ublk: Option<i32>, disk_id: &str) -> Result<()> {
         let temp = self.path.join("state.new");
         let file = File::create(&temp)?;
-        serde_json::to_writer(&file, &StateFile { state, ublk, disk_id: disk_id.to_string() })?;
+        serde_json::to_writer(&file, &StateFile { layout: LAYOUT, state, ublk, disk_id: disk_id.to_string() })?;
         file.sync_all()?;
         std::fs::rename(&temp, self.path.join("state"))?;
         File::open(&self.path)?.sync_all()?;
