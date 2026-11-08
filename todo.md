@@ -1,38 +1,60 @@
 # To do
 
-## ublk zero copy (done, 2026-10-30)
+v2 (branch `v2`) is the per-disk storage design: see `docs/design.md`.
 
-Done as in `plans/ublk-zero-copy.md`: `UBLK_F_AUTO_BUF_REG` and `UBLK_F_USER_COPY`, no per-tag buffers. Results are in `lab/results/2026-10-30-zerocopy*`, and in the progress page.
+## Docker volume plugin
 
-Still open:
+A Docker volume driver, so that `docker volume create -d mica` makes a mica disk. Only a plan; no code yet.
+
+```bash
+docker volume create -d mica app-data -o size=20G -o cache-size=512M -o unsaved-size=4G
+docker volume create -d mica sandbox-7 -o from=base-disk:base-image
+docker run -v app-data:/data --volume-driver mica ...
+docker volume rm app-data          # deletes the mica disk
+```
+
+Shape:
+
+- `mica docker serve` in the same binary, run by `mica-docker.service` as root. It listens on `/run/docker/plugins/mica.sock`, where Docker finds plugins. It is a client of the daemon socket, like the CLI. The daemon does not change.
+- The unit has `Wants=mica.service`, `After=mica.service` and `Before=docker.service`. At shutdown Docker stops its containers first, so the volumes are unmounted before the plugin and mica stop. `mica service install` writes the unit.
+- A small HTTP server in the plugin (POST with a JSON body, one request per connection), not a new HTTP crate.
+- The volume name is the disk name.
+
+Docker calls:
+
+| Call | What mica does |
+|---|---|
+| `Create` | `disk create` with the options `size`, `chunk-size`, `cache-size`, `unsaved-size` and `interval`, or `disk restore` with `from=<disk>:<snapshot>`. Default size 1G. A disk that already exists is used as it is, so existing disks become volumes. |
+| `Mount` | Attach, format a disk that was never written, and mount at `/mnt/mica-docker/<name>`. Give Docker the `data` folder below it: `lost+found` would make the volume not empty, and Docker copies image data only into an empty volume. Count users by container ID, so that a second container shares the mount. |
+| `Unmount` | When the last container leaves: `fstrim`, unmount, then detach in the background. Docker waits only about 30 s for a plugin call, and an upload can take longer. A `Mount` or `Remove` of the same volume waits for that detach. |
+| `Remove` | `disk delete`, which also deletes the snapshots of the disk. |
+| `Get`, `List`, `Path` | `Get` is one head read (`disk info`). `List` is `disk ls`: the disks of every bucket that the node knows. `Path` comes from local state. |
+| `Capabilities` | Scope `global`: any node can attach the disk, and the claim keeps it on one node at a time (on a store without conditional writes, only if users attach it on one node). |
+
+Details:
+
+- Mount directly in the plugin. Docker owns the life of the mount, and mounts the volume again when it restarts a container after a reboot.
+- Keep the container IDs per volume in `/run/mica-docker/state.json`. After a plugin restart, an `Unmount` must not unmount a volume that another container still uses. `/run` and the mounts both go away at a reboot.
+- One lock per volume, so a slow cold attach does not block other volumes.
+- The filesystem for new disks is a plugin flag (`--fs`, default ext4), not a volume option: the option would have to be kept until the first mount.
+- Attach through the daemon API (`docs/api.md`): `blank` in the answer says when to format.
+
+Lab checks: create and run; two containers on one volume; `docker volume rm`; a plugin restart while a container runs; a reboot with `--restart always` containers; an existing disk as a volume; a volume on a second node while the first has it.
+
+## ublk zero copy follow-ups
+
+Zero copy is done (`plans/ublk-zero-copy.md`, results in `lab/results/2026-10-30-zerocopy*`).
 
 - [ ] Benchmark fixed-file registration for stable backing files. [Loop example](https://github.com/ublk-org/libublk-rs/blob/main/examples/loop.rs)
 - [ ] Measure per-queue CPU use with single and multiple submitters. Try extra threads per queue only for saturated workloads, and check shallow-I/O latency. [Benchmark caveats](https://github.com/ublk-org/libublk-rs#benchmarking-caveat-one-submitter-measures-one-queue)
 - [ ] FUA writes into local chunks still copy the request through `/dev/ublkcN`. Serve them on the queue thread only if a profile shows the copy.
-
-## Idle queue threads count as iowait (done, 2026-10-30)
-
-A queue thread waits in `io_uring_enter` with requests in flight (the ublk fetch commands and the eventfd read). The kernel then counted the wait as iowait: each attached disk added up to 4 to `procs_blocked`, `/proc/pressure/io` read about 95 % and `mpstat` about 64 % iowait on an idle host. The load average did not change (io_uring waits are interruptible). The daemon itself used about 10 ms of CPU per minute with 4 idle disks.
-
-- Done: the queue runs libublk's event loop with its own wait, which passes `IORING_ENTER_NO_IOWAIT` (Linux 6.15). With 8 idle disks: 0 blocked tasks and 0 % I/O pressure.
-- Lab A/B (lab/results/2026-10-30-zerocopy-flush-cold, -cold-flush2): queue-depth-1 local reads and writes the same or faster, cold reads the same, FLUSH p50 the same (720 µs). Idle write+fdatasync was 833/s against 922/s for v0.2c and 1045/s for zero copy (5 runs each, wide spread), from a heavier p99. Watch this number.
-- VM check (4 vCPU, Ubuntu 26.04, kernel 7.0, 4 rounds against zero copy): 0 blocked tasks and under 1 % I/O pressure with 4 idle disks (16 and 99.9 % before). Idle write+fdatasync 993/s against 1004/s, queue-depth-1 and throughput tests the same within noise. Data check, 3 daemon kills mid-I/O, graceful restart (0.13 s) and idle detach (0.06 s) pass.
-- When libublk changes, compare `handle_io_events` in `src/ublk_queue.rs` with `libublk::wait_and_handle_io_events`.
-
-## Keep attached disks fully cached
-
-Today the chunk cache evicts the least recently used chunks at `cache_limit_gib`, from any disk. An attached disk can lose its cached chunks, and its next reads go to S3 again. The background fill also stops for good once the cache reaches 90%, because eviction keeps it at 90%.
-
-Idea: a cache mode with no LRU eviction. Every chunk of an attached disk stays local until the disk detaches. A cache GC removes chunks that no attached disk uses: after a detach, and when space runs low.
-
-- Config: for example `cache_eviction = "lru" | "attached"`. This changes a policy, not an implementation.
-- Admission: refuse an attach, or turn off its fill, when the cache cannot hold the disk's chunks. Count the chunks of each attached disk once, because disks share chunks.
-- Detached disks: keep their chunks while space allows, so a disk that comes back attaches warm. The cache GC removes those first.
-- Check the fill: with this mode it must fill every attached disk completely.
+- [ ] Idle write plus `fdatasync` with the no-iowait wait: 833/s against 1045/s for zero copy in the lab (wide spread), the same on the VM. Watch this number.
+- When libublk changes, compare the event loop in `src/ublk/queue.rs` with `libublk::wait_and_handle_io_events`.
 
 ## Other open items
 
-- On btrfs, a synced 4 KiB write costs about 50 µs more in a 1 GiB data file than in a new small file (idle write plus `fdatasync` 3% slower than v0.2a on a quiet host). Smaller data files do not help. Check XFS and ext4.
-- In the lab, RustFS shares the btrfs and SSD with the lab daemon, so an upload slows the daemon's syncs. A loop-mounted XFS for RustFS did not help.
-- Without conditional writes in S3, two GCs can still overlap.
-- No crash-test baseline run on v0.2a.
+- On btrfs, a synced 4 KiB write costs about 50 µs more in a 1 GiB data file than in a new small file. Smaller data files do not help. Check XFS and ext4.
+- A store without conditional writes (Garage): mica reads the head before each head write, but two machines that read at the same moment can both win. Only users, or an orchestrator, keep such a disk on one machine.
+- Linux 7.0 logs a UBSAN array-index warning in `io_buffer_register_bvec` (io_uring/rsrc.c) once per boot, when the first mica device starts (ublk auto buffer registration). Seen on Fedora 7.0.12 and Ubuntu 7.0.0. The data checks pass. Follow the upstream io_uring fix.
+- Not tested: Hetzner and Wasabi (no account). Their documents do not say if PutObject keeps `If-Match` and `If-None-Match`: `mica bucket add` probes it.
+- Lab note: RustFS shares the btrfs and SSD with the lab daemon, so an upload slows the daemon's syncs. A loop-mounted XFS for RustFS did not help.
