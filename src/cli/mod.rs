@@ -79,6 +79,7 @@ pub enum DiskCommand {
         path: PathBuf,
         #[arg(long, default_value = "ext4")]
         fs: String,
+        /// Take the disk from another node. Only when that node is off.
         #[arg(long)]
         force: bool,
     },
@@ -101,6 +102,7 @@ pub enum DiskCommand {
     /// Delete a disk and all its snapshots.
     Delete {
         disk: String,
+        /// Delete it also when another node has it attached.
         #[arg(long)]
         force: bool,
     },
