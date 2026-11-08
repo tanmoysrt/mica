@@ -77,9 +77,11 @@ impl Daemon {
             .with_claim(store, name, async |claim| {
                 ensure!(!claim.head().snapshots.contains_key(snapshot), "disk {name} has a snapshot {snapshot} already");
                 let transaction = claim.head().transaction;
-                claim.update(|head| {
-            head.snapshots.insert(snapshot.into(), Snapshot { transaction, time: unix_now(), deleting: false });
-        }).await?;
+                claim
+                    .update(|head| {
+                        head.snapshots.insert(snapshot.into(), Snapshot { transaction, time: unix_now(), deleting: false });
+                    })
+                    .await?;
                 Ok(transaction)
             })
             .await?;
