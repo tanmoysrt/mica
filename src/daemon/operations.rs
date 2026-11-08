@@ -33,6 +33,7 @@ impl Daemon {
         let size = size.next_multiple_of(chunk_size);
         let limits = limits.apply(self.default_limits()?, chunk_size)?;
         let disk = DiskStore::new(Arc::new(Bucket::connect(store)?), name);
+        disk.bucket.check_conditional_writes().await?;
         disk.create_head(&Head::new(size, chunk_size, limits, None)).await?;
         Ok(json!({ "disk": name, "size": size, "chunk_size": chunk_size }))
     }

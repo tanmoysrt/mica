@@ -3,7 +3,7 @@
 //! Each disk names its own bucket: the user passes the credentials with
 //! each command, and the daemon keeps them only for the disks it serves.
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt};
 use object_store::aws::AmazonS3Builder;
@@ -141,6 +141,22 @@ impl Bucket {
         let data = result.bytes().await.with_context(|| format!("read {key}"))?;
         add(&self.counts.bytes_in, data.len() as u64);
         Ok(Some((data, tag)))
+    }
+
+    /// mica locks a disk with conditional writes. A store that ignores the
+    /// conditions would let two nodes write one disk, so it is refused.
+    pub async fn check_conditional_writes(&self) -> Result<()> {
+        let key = format!("probe-{}", crate::store::head::random_id());
+        let result = async {
+            let Written::Done(tag) = self.put_new(&key, "1").await? else { bail!("the probe exists already") };
+            ensure!(matches!(self.put_new(&key, "2").await?, Written::Conflict), "the store ignores If-None-Match");
+            ensure!(matches!(self.put_if_match(&key, "3", "\"wrong\"").await?, Written::Conflict), "the store ignores If-Match");
+            ensure!(matches!(self.put_if_match(&key, "4", &tag).await?, Written::Done(_)), "the store refuses a correct If-Match");
+            Ok(())
+        }
+        .await;
+        let _ = self.delete_all(vec![key]).await;
+        result.context("this store cannot hold mica disks: it needs conditional writes")
     }
 
     pub async fn put(&self, key: &str, data: impl Into<Bytes>) -> Result<()> {

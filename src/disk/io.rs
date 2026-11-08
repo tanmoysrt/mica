@@ -11,7 +11,7 @@
 //! chunks to the dirty log and sync it. A flush never uses the object store.
 
 use super::slots::ChunkSlot;
-use super::{Disk, Part};
+use super::{Disk, IoStats, Part};
 use crate::store::{Entry, Hash};
 use crate::transfers::Priority;
 use anyhow::{Result, anyhow};
@@ -28,9 +28,6 @@ use tokio::task::spawn_blocking;
 /// After this many bytes of writes, the write-back of the data files starts.
 /// Linux would wait for gigabytes, and the next flush would write them all.
 const WRITEBACK_AFTER: u64 = 16 << 20;
-/// Saved chunks stay local up to this size, so that a write to a hot chunk,
-/// such as the journal of a filesystem, needs no copy. Then they go to the cache.
-const KEEP_SAVED_LOCAL: u64 = 64 << 20;
 const SLOW_FLUSH: Duration = Duration::from_millis(200);
 
 /// The content of a clean chunk: a cache file, or a download in memory.
@@ -177,21 +174,20 @@ impl Disk {
         let upto = self.writes_done.load(Ordering::SeqCst);
         // Taken before the syncs: each chunk in it wrote its data before it was listed.
         let unlogged = self.log.take_unlogged(only);
-        let segments: BTreeSet<usize> = {
-            let mut unsynced = self.unsynced.lock().unwrap();
-            match only {
-                None => std::mem::take(&mut *unsynced),
-                Some(chunks) => chunks.iter().map(|&index| self.data.segment_of(index)).collect(),
-            }
+        // A write marks the file before the log learns of its chunk, so the
+        // file holds the data of each chunk in `unlogged`.
+        let unsynced = only.is_some() || self.unsynced.swap(false, Ordering::SeqCst);
+        let (file, synced) = (self.data.file().clone(), Instant::now());
+        let mut result = match unsynced {
+            true => spawn_blocking(move || file.sync_data()).await?.map_err(anyhow::Error::from),
+            false => Ok(()),
         };
-        let syncs = segments.iter().map(|&segment| {
-            let file = self.data.segment(segment).clone();
-            async move { spawn_blocking(move || file.sync_data()).await? }
-        });
-        let mut result = futures::future::try_join_all(syncs).await.map(drop).map_err(anyhow::Error::from);
+        IoStats::add(&self.stats.data_sync_micros, synced);
+        self.stats.flushes.fetch_add(1, Ordering::Relaxed);
         if result.is_ok() && !unlogged.is_empty() {
-            let (log, chunks) = (self.log.clone(), unlogged.clone());
+            let (log, chunks, appended) = (self.log.clone(), unlogged.clone(), Instant::now());
             result = spawn_blocking(move || log.append(&chunks)).await?;
+            IoStats::add(&self.stats.log_append_micros, appended);
         }
         match &result {
             Ok(()) if only.is_none() => drop(self.writes_synced.fetch_max(upto, Ordering::SeqCst)),
@@ -200,12 +196,12 @@ impl Disk {
             // that works proves nothing. The disk stops for good.
             Err(error) => {
                 self.log.give_back(&unlogged);
-                self.unsynced.lock().unwrap().extend(&segments);
+                self.unsynced.store(true, Ordering::SeqCst);
                 self.stop(&format!("a local sync failed: {error:#}"));
             }
         }
         if started.elapsed() > SLOW_FLUSH {
-            log::warn!("disk {}: slow flush, {} ms for {} files", self.name, started.elapsed().as_millis(), segments.len());
+            log::warn!("disk {}: slow flush, {} ms", self.name, started.elapsed().as_millis());
         }
         result
     }
@@ -218,7 +214,8 @@ impl Disk {
             return Ok(slot);
         }
         if !whole {
-            let data = self.data.clone();
+            let (data, copied) = (self.data.clone(), Instant::now());
+            self.stats.chunk_copies.fetch_add(1, Ordering::Relaxed);
             match slot.base.is_zero() {
                 true if data.has_holes() => {}
                 true => spawn_blocking(move || data.zero(index)).await??,
@@ -227,6 +224,7 @@ impl Disk {
                     Clean::Data(chunk) => spawn_blocking(move || data.write_at(index, 0, &chunk)).await??,
                 },
             }
+            IoStats::add(&self.stats.chunk_copy_micros, copied);
         }
         slot.local = true;
         self.local.lock().unwrap().insert(index);
@@ -278,7 +276,7 @@ impl Disk {
     /// next flush before the log learns of the chunk, so a flush that logs
     /// the chunk also syncs its data.
     pub(super) fn finish_write(&self, slot: &mut ChunkSlot, index: usize, bytes: u64) {
-        self.unsynced.lock().unwrap().insert(self.data.segment_of(index));
+        self.unsynced.store(true, Ordering::SeqCst);
         self.log.note_write(index);
         self.writes_done.fetch_add(1, Ordering::SeqCst);
         slot.written = Some(Instant::now());
@@ -297,9 +295,8 @@ impl Disk {
     pub async fn run_writeback(self: Arc<Self>) {
         while !self.is_closed() {
             self.writeback_wanted.notified().await;
-            let segments: Vec<usize> = self.unsynced.lock().unwrap().iter().copied().collect();
             let data = self.data.clone();
-            let _ = spawn_blocking(move || segments.into_iter().for_each(|segment| data.start_writeback(segment))).await;
+            let _ = spawn_blocking(move || data.start_writeback()).await;
         }
     }
 
@@ -354,11 +351,11 @@ impl Disk {
         self.clean(index, base, priority).await.map(drop)
     }
 
-    /// Saved chunks over `KEEP_SAVED_LOCAL` leave the data files, oldest
+    /// Saved chunks over `Tuning::keep_saved_local` leave the data files, oldest
     /// first, and go into the cache. The dirty log drops them before their
     /// space is freed: a crash must not bring back a chunk that is a hole.
     pub(super) async fn free_saved(&self) -> Result<()> {
-        let keep = (KEEP_SAVED_LOCAL / self.chunk_size) as usize;
+        let keep = (self.tuning.keep_saved_local / self.chunk_size) as usize;
         let mut freed = std::mem::take(&mut *self.unpunched.lock().unwrap());
         loop {
             let next = {

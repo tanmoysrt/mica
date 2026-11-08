@@ -146,7 +146,7 @@ pub async fn run(cli: Cli, config: Config) -> Result<()> {
     let snapshots_only = matches!(cli.command, Command::Snapshot(_));
     let request = match cli.command {
         Command::Daemon => unreachable!("main runs the daemon"),
-        Command::Service(command) => return service::run(command, &cli.config),
+        Command::Service(command) => return service::run(command, &cli.config, cli.store.as_deref()),
         Command::Status => Request::Status,
         Command::Disk(DiskCommand::Ls) => Request::List { store: store()? },
         Command::Disk(DiskCommand::Info { disk }) => Request::Info { store: store()?, disk },

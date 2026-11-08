@@ -81,7 +81,11 @@ fc_image() {
     [[ -f $CACHE/fc/id_ed25519 ]] || ssh-keygen -q -t ed25519 -N "" -f "$CACHE/fc/id_ed25519"
     local context
     context=$(mktemp -d)
-    if [[ $GUEST == alpine ]]; then cp "$LAB/fc/Dockerfile.alpine" "$context/Dockerfile"; else cp "$LAB/fc/Dockerfile" "$context/"; fi
+    case $GUEST in
+        alpine) cp "$LAB/fc/Dockerfile.alpine" "$context/Dockerfile" ;;
+        mariadb) cp "$LAB/fc/Dockerfile.mariadb" "$context/Dockerfile" ;;
+        *) cp "$LAB/fc/Dockerfile" "$context/" ;;
+    esac
     cp "$CACHE/fc/id_ed25519.pub" "$context/authorized_keys"
     docker build -q -t "mica-lab-guest-$GUEST" "$context" >/dev/null
     rm -rf "$context"

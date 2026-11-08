@@ -50,6 +50,8 @@ pub struct Tuning {
     pub transaction_after: u64,
     /// A disk is behind when its oldest unsaved write is older than this.
     pub max_unsaved_age: Duration,
+    /// Saved chunks over this size leave the data files for the cache.
+    pub keep_saved_local: u64,
 }
 
 pub struct Disk {
@@ -84,7 +86,8 @@ pub struct Disk {
     downloads: Mutex<HashMap<crate::store::Hash, Arc<tokio::sync::Mutex<()>>>>,
 
     /// Data files written since the last flush.
-    unsynced: Mutex<BTreeSet<usize>>,
+    /// Writes went into the data file since the last sync.
+    unsynced: AtomicBool,
     /// Writes done, and how many of them a flush made durable.
     writes_done: AtomicU64,
     writes_synced: AtomicU64,
@@ -101,6 +104,7 @@ pub struct Disk {
     /// A stopped disk fails all I/O and keeps its local data.
     stopped: Mutex<Option<String>>,
     closed: AtomicBool,
+    pub(crate) stats: IoStats,
 }
 
 #[derive(Debug, Serialize)]
@@ -114,6 +118,26 @@ pub struct Status {
     pub limits: Limits,
     pub behind: bool,
     pub stopped: Option<String>,
+    /// Requests and bytes to the bucket since the attach: they set the bill.
+    pub requests: serde_json::Value,
+    pub io: serde_json::Value,
+}
+
+/// Where the time of writes and flushes goes, for `mica status --json`.
+#[derive(Debug, Default, Serialize)]
+pub struct IoStats {
+    /// Chunks made local for a write that covers only part of the chunk.
+    pub chunk_copies: AtomicU64,
+    pub chunk_copy_micros: AtomicU64,
+    pub flushes: AtomicU64,
+    pub data_sync_micros: AtomicU64,
+    pub log_append_micros: AtomicU64,
+}
+
+impl IoStats {
+    pub fn add(counter: &AtomicU64, started: std::time::Instant) {
+        counter.fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
+    }
 }
 
 /// The part of a request that falls into one chunk.
@@ -172,7 +196,8 @@ impl Disk {
             saved: Mutex::default(),
             unpunched: Mutex::default(),
             downloads: Mutex::default(),
-            unsynced: Mutex::default(),
+            // The first flush syncs what a crashed daemon left.
+            unsynced: AtomicBool::new(true),
             // Above zero: the first flush syncs what a crashed daemon left.
             writes_done: AtomicU64::new(1),
             writes_synced: AtomicU64::new(0),
@@ -186,13 +211,13 @@ impl Disk {
             oldest_unsaved: Mutex::new(None),
             stopped: Mutex::new(None),
             closed: AtomicBool::new(false),
+            stats: IoStats::default(),
         });
         for index in listed {
             let mut slot = disk.slot(index).await?.write_owned().await;
             slot.local = true;
             disk.local.lock().unwrap().insert(index);
             disk.mark_unsaved(&mut slot, index);
-            disk.unsynced.lock().unwrap().insert(disk.data.segment_of(index));
         }
         Ok(disk)
     }
@@ -217,6 +242,8 @@ impl Disk {
             limits: *self.limits.lock().unwrap(),
             behind: self.is_behind(),
             stopped: self.stopped.lock().unwrap().clone(),
+            requests: serde_json::to_value(&self.store.bucket.counts).unwrap_or_default(),
+            io: serde_json::to_value(&self.stats).unwrap_or_default(),
         }
     }
 

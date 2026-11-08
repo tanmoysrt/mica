@@ -1,36 +1,18 @@
-# Copy to /etc/mica/config.toml.
-# Empty S3 fields are read from the environment:
-# S3_ENDPOINT, BUCKET_NAME, ACCESS_KEY_ID, SECRET_ACCESS_KEY, S3_REGION, S3_PREFIX.
+# The node settings of mica. Copy to /etc/mica/config.toml.
+# Each setting is optional. The values here are the defaults.
+# The bucket of a disk is not here: see store.example.toml.
 
 socket = "/run/mica.sock"
+# Data files, dirty logs and the chunk cache. Use a local SSD.
 data_dir = "/var/lib/mica"
-# Host-wide safeguard for total clean-cache data.
-cache_limit_gib = 50
-# Default clean-cache budget per disk; disk --cache-size overrides it.
-disk_cache_limit_mib = 1024
-# Reclaim clean cache and pause new writes below this filesystem headroom.
-local_reserve_mib = 1024
-# Default pending-write budget per disk; disk --dirty-size overrides it.
-dirty_limit_gib = 20
-checkpoint_interval_secs = 180
-# A disk is "behind" when data not in S3 is older than this.
+# Files that a reboot must remove: bucket credentials and recent bitmaps.
+run_dir = "/run/mica"
+# A transaction uploads the changed chunks at this interval.
+transaction_interval_seconds = 30
+# A transaction starts early when this much data waits for upload.
+transaction_after = "512M"
+# The budgets of a new disk, when `mica disk create` gives none.
+cache_size = "512M"
+unsaved_size = "4G"
+# A disk is "behind" when its oldest unsaved write is older than this.
 max_unsaved_minutes = 5
-# When behind, guest writes wait until uploads catch up.
-wait_when_behind = false
-# `mica disk mount` only mounts below these folders.
-mount_roots = ["/mnt", "/srv", "/media"]
-# `mica gc` keeps this many checkpoints of each disk as restore points.
-gc_keep_checkpoints = 5
-# `mica gc` never deletes objects written in the last hours.
-gc_grace_hours = 24
-# MemoryHigh= for mica.service, such as "2G". Empty means no limit: the
-# kernel frees mica's page cache anyway when other programs need memory.
-memory_high = ""
-
-[s3]
-endpoint = ""
-bucket = ""
-access_key_id = ""
-secret_access_key = ""
-region = "auto"
-prefix = ""

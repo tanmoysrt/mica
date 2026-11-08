@@ -8,6 +8,9 @@ use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Head {
+    /// A random identifier, new for each disk. Local data names it, so a
+    /// new disk with the name of a deleted one never takes its local data.
+    pub id: String,
     /// The current version. 0 means a disk that was never written.
     pub transaction: u64,
     /// The folder of the next transaction. Every claim and every
@@ -65,6 +68,7 @@ pub struct Limits {
 impl Head {
     pub fn new(size: u64, chunk_size: u64, limits: Limits, owner: Option<Owner>) -> Self {
         Self {
+            id: random_id(),
             transaction: 0,
             next: 1,
             owner,
@@ -82,4 +86,12 @@ impl Head {
     pub fn owned_by(&self, id: &str) -> bool {
         self.owner.as_ref().is_some_and(|owner| owner.id == id)
     }
+}
+
+/// A random UUID from the kernel.
+pub fn random_id() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/random/uuid").map(|id| id.trim().to_string()).unwrap_or_else(|_| {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        format!("{nanos:x}-{:x}", std::process::id())
+    })
 }

@@ -1,0 +1,16 @@
+# The lab guest with MariaDB and sysbench, for database tests on a mica disk.
+# `GUEST=mariadb lab/lab.sh fc-image` exports it like the other guests.
+FROM ubuntu:24.04
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        systemd systemd-sysv udev openssh-server iproute2 iputils-ping fio python3 \
+        e2fsprogs util-linux procps kmod less mariadb-server sysbench \
+    && rm -rf /var/lib/apt/lists/*
+RUN echo lab-vm > /etc/hostname \
+    && passwd -d root \
+    && mkdir -p /root/.ssh && chmod 700 /root/.ssh \
+    && sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config \
+    && systemctl enable systemd-networkd ssh mariadb \
+    && systemctl mask apt-daily.timer apt-daily-upgrade.timer \
+    && printf '[Match]\nName=eth0\n\n[Network]\nAddress=172.30.0.2/30\nGateway=172.30.0.1\n' > /etc/systemd/network/10-eth0.network \
+    && printf '[mysqld]\ninnodb_buffer_pool_size=512M\ninnodb_log_file_size=256M\ninnodb_flush_method=O_DIRECT\nskip_name_resolve=1\n' > /etc/mysql/mariadb.conf.d/90-lab.cnf
+COPY authorized_keys /root/.ssh/authorized_keys

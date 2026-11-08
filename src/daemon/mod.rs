@@ -79,17 +79,16 @@ impl Daemon {
             };
         }
         let folder = self.folder(name);
-        if folder.exists() {
-            if folder.state()? == LocalState::Orphaned {
-                bail!("disk {name} has orphaned local data in {}: copy it out, then delete the folder", folder.path.display());
-            }
-            if folder.place()? != store.place() {
-                bail!("a disk {name} from another bucket has local data on this node");
-            }
+        if folder.exists() && folder.state()? == LocalState::Orphaned {
+            bail!("disk {name} has orphaned local data in {}: copy it out, then delete the folder", folder.path.display());
         }
         let store_handle = DiskStore::new(Arc::new(Bucket::connect(store)?), name);
-        let claim = Claim::take(store_handle, &self.node, force).await?;
-        folder.create(store)?;
+        let mut claim = Claim::take(store_handle, &self.node, force).await?;
+        if let Err(error) = check_folder(&folder, &claim) {
+            let _ = claim.release().await;
+            return Err(error);
+        }
+        folder.create(&claim.head().id)?;
         folder.save_store(store)?;
         let disk = self.open(claim, &folder).await?;
         let profile = disk.claim().await.head().profile.clone();
@@ -189,6 +188,12 @@ impl Daemon {
                 return Err(error.context("the local data is kept as orphaned"));
             }
         };
+        if let Err(error) = check_folder(folder, &claim) {
+            if let Some(id) = paused {
+                tokio::task::spawn_blocking(move || device::remove_paused(id)).await??;
+            }
+            return Err(error);
+        }
         let disk = self.open(claim, folder).await?;
         let device = self.start_device(&disk, folder, paused).await?;
         log::info!("disk {}: serves {} again after the restart", disk.name, device.path);
@@ -265,4 +270,14 @@ impl Daemon {
     fn lock(&self, name: &str) -> Arc<Mutex<()>> {
         self.locks.lock().unwrap().entry(name.to_string()).or_default().clone()
     }
+}
+
+/// Local data of another disk with the same name: from another bucket, or
+/// from a deleted disk. It is kept as orphaned, and never used.
+fn check_folder(folder: &DiskFolder, claim: &Claim) -> Result<()> {
+    if folder.exists() && folder.disk_id()? != claim.head().id {
+        folder.set_state(LocalState::Orphaned)?;
+        bail!("the local data in {} is of another disk {}: it is kept as orphaned", folder.path.display(), folder.disk);
+    }
+    Ok(())
 }

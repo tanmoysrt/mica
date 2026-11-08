@@ -1,254 +1,153 @@
-# Operations
+# Running mica
 
-How to install mica on a node, configure it, and run it day to day.
+This guide shows how to install mica, how to use disks, and what to do
+when something goes wrong. [design.md](design.md) explains how mica works.
 
 ## Requirements
 
-- Linux 6.16 or later with the `ublk_drv` module: mica needs `UBLK_F_AUTO_BUF_REG` and `UBLK_F_USER_COPY` (zero copy) and `UBLK_F_USER_RECOVERY_REISSUE` (restart without downtime).
-- systemd.
-- An S3-compatible bucket: Cloudflare R2, Ceph RGW or Garage. mica does not need conditional writes.
-- A local SSD for `/var/lib/mica`. XFS or btrfs is best: their reflink copies make chunk copies free.
-- `mkfs.ext4` or `mkfs.xfs`, and `fstrim`, for `mica disk mount`.
-- To build: Rust, and libclang (`clang-devel` on Fedora, `libclang-dev` on Debian and Ubuntu).
+- Linux 6.16 or later, with the `ublk_drv` module. mica uses the zero-copy
+  and user-recovery features of ublk.
+- systemd, and root for the daemon.
+- A local SSD for `/var/lib/mica`.
+- An S3 bucket with conditional writes (`If-Match` and `If-None-Match`).
+  AWS S3, Cloudflare R2, MinIO and RustFS have them. `mica disk create`
+  checks the bucket first, and refuses a bucket without them.
 
-## Setup
-
-Install mica from GitHub, then run setup as root:
+## Install
 
 ```bash
 cargo install --git https://github.com/tanmoysrt/mica
-sudo ~/.cargo/bin/mica service setup
+sudo cp ~/.cargo/bin/mica /usr/local/bin/
+sudo mica service install       # writes mica.service, starts it, and starts it at boot
 ```
 
-`sudo` does not search `~/.cargo/bin`, so give the full path. Setup copies the binary to `/usr/local/bin/mica`; after that, `mica` works everywhere.
+The node settings are in `/etc/mica/config.toml`. The file is optional:
+see [config.example.toml](../config.example.toml) for each setting and its
+default.
 
-Setup asks for the S3 settings. Each prompt shows the current value; Enter keeps it. The secret key is never shown. Then setup:
+## The bucket of a disk
 
-1. Loads `ublk_drv`, and makes it load at boot.
-2. Creates the `mica` group.
-3. Checks that the data folder supports reflink copies.
-4. Tests the bucket with a put, a get and a delete, and names the step that fails.
-5. Saves `/etc/mica/config.toml` with mode 0600, because it holds the secret key.
-6. Copies the binary to `/usr/local/bin/mica`.
-7. Installs `mica.service` and `mica-mount@.service`, and starts mica. A running mica restarts without downtime.
-8. Offers to add you to the `mica` group.
-
-**Without questions**, for automation: write the config file first, then
+Each command that uses the bucket needs its credentials. Write them into
+a file, and keep it private:
 
 ```bash
-sudo mica service setup --use-config-file
+cp store.example.toml ~/photos.toml
+chmod 600 ~/photos.toml
 ```
 
-It fails with a list of every missing field. Setup reads only the file, never the shell environment, because a systemd service does not get that environment.
+Then give the file with `--store ~/photos.toml`, or set `MICA_STORE`, or
+set the variables `S3_ENDPOINT`, `S3_BUCKET`, `S3_PREFIX`, `S3_REGION`,
+`S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY`.
 
-**To upgrade**, install the new version and run setup again. Attached disks keep working through the restart:
+Two disks can use two buckets with two sets of credentials. The daemon
+keeps the credentials of an attached disk only in memory and in `/run`.
+
+## Use a disk
 
 ```bash
-cargo install --git https://github.com/tanmoysrt/mica --force
-sudo ~/.cargo/bin/mica service setup --use-config-file
+export MICA_STORE=~/photos.toml
+sudo -E mica disk create photos --size 500G      # no space is used until it is written
+sudo -E mica disk mount photos /mnt/photos       # attach, format when new, mount
+sudo -E mica status
+sudo -E mica disk unmount photos                 # trim, unmount, upload all, detach
 ```
 
-## Configuration
-
-`/etc/mica/config.toml`:
-
-```toml
-socket = "/run/mica.sock"
-data_dir = "/var/lib/mica"
-cache_limit_gib = 50
-disk_cache_limit_mib = 1024
-local_reserve_mib = 1024
-dirty_limit_gib = 20
-checkpoint_interval_secs = 30
-checkpoint_after_mib = 512
-max_unsaved_minutes = 5
-wait_when_behind = false
-mount_roots = ["/mnt", "/srv", "/media"]
-gc_keep_checkpoints = 5
-gc_grace_hours = 24
-prefetch_on_attach = true
-background_fill = true
-memory_high = ""
-
-[s3]
-endpoint = "https://<account>.r2.cloudflarestorage.com"
-bucket = "my-bucket"
-access_key_id = "..."
-secret_access_key = "..."
-region = "auto"
-prefix = ""
-conditional_writes = false
-```
-
-| Setting | Default | Meaning |
-|---|---|---|
-| `socket` | `/run/mica.sock` | The daemon's Unix socket |
-| `data_dir` | `/var/lib/mica` | Local chunks, cache and state. Cache and dirty chunks must be on one filesystem. |
-| `cache_limit_gib` | 50 | Host safeguard for total clean-cache data |
-| `disk_cache_limit_mib` | 1024 | Default clean cache per disk, overridden by `--cache-size` |
-| `local_reserve_mib` | 1024 | Filesystem headroom; reclaim cache and pause writes below this |
-| `dirty_limit_gib` | 20 | Local data not yet in S3, **for each attached disk**. At half, a checkpoint starts early; at the limit, writes wait. |
-| `checkpoint_interval_secs` | 30 | Time between checkpoints of a busy disk. Keep it well below `max_unsaved_minutes`. |
-| `checkpoint_after_mib` | 512 | A checkpoint also starts when this much local data is not in S3. So uploads run while the guest writes, and a detach has little left to upload. |
-| `max_unsaved_minutes` | 5 | A disk is **behind** when data not in S3 is older than this |
-| `wait_when_behind` | false | When behind, guest writes wait until uploads catch up. The data-loss bound then always holds; on a slow link, writes are slow. |
-| `mount_roots` | `/mnt`, `/srv`, `/media` | `mica disk mount` only mounts below these folders |
-| `gc_keep_checkpoints` | 5 | Checkpoints of each disk that GC keeps as restore points |
-| `gc_grace_hours` | 24 | GC never deletes objects written in this time |
-| `prefetch_on_attach` | true | At attach, download the chunks of the read profile: what the disk read first in its last session, up to 64 MiB |
-| `background_fill` | true | After that, download every other chunk of the disk, behind all reads, until the cache is nearly full. `mica disk attach --no-fill` turns it off for one attach. |
-| `memory_high` | empty | `MemoryHigh=` of `mica.service`, such as `2G`. Empty means no limit. |
-| `s3.endpoint` | – | S3 endpoint URL |
-| `s3.bucket` | – | Bucket name |
-| `s3.access_key_id`, `s3.secret_access_key` | – | Credentials |
-| `s3.region` | `auto` | Region; `auto` works for R2 |
-| `s3.prefix` | empty | Key prefix, so that one bucket can hold many mica setups |
-| `s3.conditional_writes` | false | The store honors `If-None-Match: *` on PUT. Then a claim is one atomic create, and an attach takes about 25 ms, not 1 s. True for R2, AWS S3, MinIO and RustFS. Keep it false for Garage. |
-
-When you run `mica daemon` by hand during development, empty S3 fields come from the environment: `S3_ENDPOINT`, `BUCKET_NAME`, `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, `S3_REGION`, `S3_PREFIX`.
-
-## Permissions
-
-The daemon runs as root. Its socket is `root:mica`, mode 0660. To use mica without sudo:
+On another node with the same bucket file:
 
 ```bash
-sudo usermod -aG mica $USER
-newgrp mica
+sudo -E mica disk mount photos /mnt/photos
 ```
 
-A member of the group must not become root through mica, so:
-
-- `mica disk mount` asks the daemon, which mounts through a systemd unit. The member's own process never mounts.
-- Mounts go only below `mount_roots`. Paths with `..`, and symlinks that lead outside, are refused.
-- Mounts use `nosuid` and `nodev`.
-- `--force`, and `--owner` for another user, need root.
-- The config file, which holds the secret key, stays readable by root only. The CLI does not need it.
-
-## Running a node
-
-### Persistent mounts
-
-With the service installed, `mica disk mount` creates `mica-mount@<disk>.service`:
-
-- At boot, systemd starts mica, then attaches and mounts the disk.
-- At shutdown, systemd unmounts the disk and uploads its data, then stops mica.
-- `systemctl status mica-mount@disk-1` shows one mount. `systemctl list-units 'mica-mount@*'` shows all.
-
-`mica disk unmount` stops and removes the unit.
-
-### Containers
-
-Mount on the host, then bind-mount the path:
+For a VM, attach the disk and give the device to the VM:
 
 ```bash
-mica disk mount data-1 /srv/volumes/data-1
-docker run -v /srv/volumes/data-1:/data my-image
+sudo -E mica disk attach vm-data                 # makes /dev/mica/vm-data
+firecracker ...  # drive path_on_host = /dev/mica/vm-data
+sudo -E mica disk detach vm-data                 # after the VM stops
 ```
 
-### VMs
+The main use is a data disk: the VM boots from a local root disk, and the
+mica disk holds its data, such as a database. A VM can also boot from a
+mica disk.
 
-Attach the raw device and give it to the VMM:
+### Commands
 
-```bash
-mica disk attach sandbox-7
-qemu-system-x86_64 ... -drive file=/dev/mica/sandbox-7,format=raw,if=virtio,cache=none
-```
-
-Stop the VM before `mica disk detach`.
-
-### Images for fast boots
-
-```bash
-mica disk create builder --size 20G
-mica disk attach builder
-# install the OS on /dev/mica/builder, boot it once, stop it
-mica disk detach builder
-mica snapshot create builder base-image
-mica disk create sandbox-1 --from-snapshot base-image
-```
-
-The first boot records a read profile, and every disk made from the snapshot carries it. With `mica disk attach <disk> --prefetch <chunks>`, those chunks download in the background at attach. A node that keeps the base image's chunks in its cache boots such disks without any downloads.
-
-### Warming a node
-
-To make every sandbox from an image start without downloads, warm the node once:
-
-```bash
-mica disk warm base-image
-```
-
-The chunks stay in the cache while any attached disk uses them. `mica cache prune` keeps them for as long as one such disk is attached.
-
-### Cleaning up
-
-- `mica gc` deletes data that nothing needs: old chunk versions, deleted disks and snapshots. Run it from time to time, for example daily from a timer or your controller (`mica gc -y`).
-- `mica cache prune` frees local cache space. The cache also trims itself at its limit, so this is optional.
-
-## Memory
-
-`systemctl status mica` counts the page cache of the data files against mica. That memory is free for any program that needs it. mica's own memory is small: about 15 MiB idle, and about 80 MiB during a large upload.
-
-To cap the page cache anyway, set `memory_high = "2G"` and run `mica service setup --use-config-file`. Above the limit, the kernel reclaims mica's cache and slows mica down; it never kills it.
-
-## Performance
-
-Measured in a local lab: RustFS behind a 100 MiB/s link with 1 ms round trip, and a local disk limited to 300 MiB/s. The full results, with v0.1 next to v0.2, are at <https://sites.tanmoysarkar.me/research/mica-v0-2-optimization/>.
-
-| Test | v0.1 | v0.2 |
-|---|---|---|
-| Attach of one disk | 1,035 ms | 24 ms |
-| 4 disks attached at the same time | 4.2 s | 0.06 s |
-| Cold Firecracker boot (Ubuntu), attach until ssh answers | 4.6 s | 2.8 s |
-| S3 download during that boot | 250 MiB | 136 MiB |
-| Cold sequential read, 1 reader | 69 MiB/s | 91 MiB/s (the link) |
-
-Cold reads, the background fill and uploads are limited by the network to S3. Warm reads are limited by the local disk.
-
-## Cost
-
-On Cloudflare R2: storage $0.015 per GB-month, Class A requests (PUT, LIST) $4.50 per million, Class B (GET, HEAD) $0.36 per million, DELETE and egress free.
-
-| Action | Class A | Class B | Cost |
-|---|---|---|---|
-| Idle attached disk | 0 | 0 | $0 |
-| Create and mount a new disk | 3 | ~11 | – |
-| Write 1 GiB of new data, 256 KiB chunks | 4,096 | – | $0.018 |
-| Write 1 GiB of new data, 4 MiB chunks | 256 | – | $0.0012 |
-| A checkpoint after a small write | ~4 | ~5 | – |
-| Stop and start a sandbox (Ubuntu, cold cache, 256 KiB chunks) | ~6 | ~550 | $0.0002 |
-| A disk busy all day, every day (a checkpoint every 30 s) | ~350,000 / month | ~430,000 / month | ~$1.70 / month |
-| 1 TB of stored data | – | – | ~$15 / month |
-
-Storage is the main cost. Chunks are compressed, and disks made from one snapshot share its chunks, so an image is stored once. Small chunks and frequent checkpoints cost more requests: set `--chunk-size 4M` and a longer `checkpoint_interval_secs` for disks where that matters more than cold reads. `mica status` shows the requests since mica started.
-
-## Troubleshooting
-
-| Message | Cause and fix |
+| Command | What it does |
 |---|---|
-| `mica is not running` | Start it: `sudo mica service start`. See `mica service logs`. |
-| `no permission to use mica` | Join the `mica` group, or use sudo. |
-| `disk X is attached on Y` | Detach it on node Y. If node Y is gone for good, `mica disk attach X --force` as root. |
-| `/dev/ublkbN is in use` | Unmount it, or stop the VM or container first. |
-| `upload is behind` in `mica status` | Uploads are slower than writes, or S3 is unreachable. Check the network and `mica service logs`. |
-| `taken by another node` | Another node took the disk. The local data is kept as orphaned in `/var/lib/mica/disks/<disk>`. |
-| `stopped: local sync failed` | The local SSD failed a sync. The disk is stopped and its local data kept. Check the SSD (`dmesg`). S3 has the last commit. |
-| `was attached on X at the same moment` | Two nodes attached the disk at once, and the other won. Check your controller. |
-| `mount paths must be inside …` | Mount below `mount_roots`, or add the folder to `mount_roots`. |
-| `cannot stop: disks are attached here` | Unmount or detach the disks, or use `--force` and accept that their devices pause. |
+| `mica status` | The disks attached on this node, their unsaved data and cache |
+| `mica disk ls` | The disks in the bucket |
+| `mica disk info <disk>` | One disk, its budgets and snapshots |
+| `mica disk create <disk> --size 20G [--chunk-size 256K] [--cache-size 1G] [--unsaved-size 4G]` | A new, empty disk |
+| `mica disk attach <disk> [--force] [--no-fill]` | Makes `/dev/mica/<disk>` |
+| `mica disk mount <disk> <path> [--fs ext4] [--no-fill]` | Attach, format when new, mount |
+| `mica disk unmount <disk or path>` | Trim, unmount, detach |
+| `mica disk detach <disk>` | Upload all data and give the disk free |
+| `mica disk commit <disk>` | Run a transaction now |
+| `mica disk set-limits <disk> [--cache-size] [--unsaved-size]` | New budgets, kept in the head |
+| `mica disk resize <disk> --size 40G` | A larger disk (detached only) |
+| `mica disk restore <disk> <snapshot> <new disk>` | A new disk from a snapshot |
+| `mica disk delete <disk>` | Delete the disk and its snapshots |
+| `mica snapshot ls / create / delete <disk> <name>` | Snapshots |
+| `mica service install / uninstall / start / stop / restart / status / logs` | The systemd unit |
+| `mica service add-disk <disk> <path>` / `remove-disk <disk>` | Mount a disk at each boot |
 
-## Uninstall
+`--json` prints the answer of the daemon as JSON. `mica status --json`
+also shows the requests and bytes of each disk since its attach.
+
+### Choose the chunk size
+
+The chunk size is fixed when the disk is made.
+
+- **256 KiB** (the default) suits most disks: files, boot disks, mixed use.
+- **64 KiB** suits databases with random writes. A write into a chunk that
+  is not local first copies the whole chunk, so small chunks copy less and
+  upload less.
+- **1 MiB to 4 MiB** suits large files that are read and written in order,
+  such as video or backups. Fewer chunks mean fewer requests.
+
+## A disk on a laptop or a desktop
+
+mica can give a laptop a large disk whose data lives in a bucket. sudo is
+needed once, to set it up:
 
 ```bash
-sudo mica service uninstall          # keeps the config and the local cache
-sudo mica service uninstall --purge  # removes them too
+sudo mica service install
+sudo mica --store ~/photos.toml disk create photos --size 1T --cache-size 20G
+sudo mica --store ~/photos.toml service add-disk photos ~/photos
 ```
 
-It refuses while any disk is attached, mounted by mica, or has local data that may not be in S3.
+`add-disk` copies the bucket file to `/etc/mica/disks/photos.toml` (root
+only) and writes `mica-disk-photos.service`. The disk mounts at `~/photos`
+at each boot, and the folder belongs to you. After that, use `~/photos`
+with no sudo.
 
-## Per-disk storage budgets
+At shutdown, the unit only unmounts. The daemon runs a last transaction,
+and the local data stays on the laptop. So a shutdown never waits for a
+full upload, and the next boot goes on from the local data. Give the disk
+a large cache, so that most reads stay local when the laptop is offline.
+Without a network, reads of data that is not local fail, and writes wait
+when the unsaved data reaches its limit.
 
-A disk can expose 50 GiB while retaining only 500 MiB of clean data locally: `mica disk create small-cache --size 50G --cache-size 500M --dirty-size 256M`. Reads outside its cache download from S3. The provisioned size bounds block I/O; there is no separate maximum-size setting.
+## Restart, upgrade and crashes
 
-Clean caches are independent per disk. This makes accounting and eviction predictable, at the cost of storing duplicate clean chunks locally when disks share an image. S3 chunks and metadata pages remain shared. Explicit limits live in the disk head; disks without explicit limits use `disk_cache_limit_mib` and `dirty_limit_gib` on the current node. Clones use their own supplied limits or node defaults.
+`sudo systemctl restart mica` keeps the disks attached and the file
+systems mounted. Each device pauses for about a second. Use it to upgrade
+mica: replace the binary, then restart.
 
-After a commit, saved chunks stay in the data files, up to the disk's cache budget, so a rewrite needs no copy and no download. Over that budget, or when the host is short of space, mica copies the oldest to the clean cache, removes them from the dirty log, and frees their data-file ranges. So a disk can keep up to its cache budget in the data files and the same again in its clean cache. A reconciler runs every second to trim caches, retry reclamation, and request checkpoints under space pressure. `cache_limit_gib` is the aggregate host safeguard. `local_reserve_mib` is free filesystem space to preserve; if clean-cache eviction cannot restore it, new writes wait while checkpointing continues. This is a periodic safeguard, not a filesystem quota: in-flight I/O, metadata, checkpoint copies, open evicted files, and other applications can consume additional space.
+After a crash, systemd starts mica again, and mica takes the devices over.
+After a reboot, the local data stays. Attach or mount the disk again, or
+let `add-disk` do it.
+
+## When something goes wrong
+
+| Message | Meaning | What to do |
+|---|---|---|
+| `disk … is attached on <node>` | Another node owns the disk | Detach it there. When that node is gone for good, use `--force`. |
+| `stopped: another node took the disk` | A forced attach took the disk | The local data is kept as orphaned in `/var/lib/mica/disks/<disk>`. Copy out what you need, then delete the folder. |
+| `… has orphaned local data` | The folder holds data that is not in the bucket | Same as above. |
+| `the local data … is of another disk` | A disk with this name was deleted and made again | The old data is kept as orphaned. |
+| `this store cannot hold mica disks` | The bucket ignores conditional writes | Use another bucket or provider. |
+| `upload is behind` in `mica status` | Unsaved data is older than five minutes | Check the network and the bucket. Writes wait at the unsaved limit. |
+| `stopped: a local sync failed` | The local SSD failed a write | The disk refuses I/O. Check the SSD. |
+
+`mica service logs -f` shows the log of the daemon.

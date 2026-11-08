@@ -30,7 +30,7 @@ impl NodeId {
         let id = match std::fs::read_to_string(&path) {
             Ok(id) => id.trim().to_string(),
             Err(_) => {
-                let id = std::fs::read_to_string("/proc/sys/kernel/random/uuid")?.trim().to_string();
+                let id = crate::store::head::random_id();
                 std::fs::create_dir_all(data_dir)?;
                 std::fs::write(&path, &id).with_context(|| format!("write {}", path.display()))?;
                 id

@@ -4,8 +4,8 @@
 //! writes go into the data files in place. A range that is not local is a
 //! hole, so a data file uses space only for local chunks.
 //!
-//! Each data file covers 1 GiB of the disk. A sync of one file does not wait
-//! for the writes into the others, and a small file syncs fast.
+//! One sparse file holds the whole disk, so a flush syncs one file. On
+//! ext4 a file has at most 16 TiB, so a disk on ext4 has at most 16 TiB.
 
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeSet;
@@ -15,56 +15,43 @@ use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::Arc;
 
-const SEGMENT_BYTES: u64 = 1 << 30;
-
 pub struct DataFiles {
     chunk_size: u64,
-    segments: Vec<Arc<File>>,
+    file: Arc<File>,
     /// False when the filesystem cannot punch holes. Then a chunk that is
     /// not local can hold old data, and must be zeroed before a partial write.
     holes: bool,
 }
 
 impl DataFiles {
-    /// Opens or makes the files. A crash can leave writes in ranges that no
+    /// Opens or makes the file. A crash can leave writes in ranges that no
     /// log lists, so these ranges are punched out: only `listed` chunks stay.
     pub fn open(dir: &Path, disk_size: u64, chunk_size: u64, listed: &BTreeSet<usize>) -> Result<Self> {
-        let mut segments = Vec::new();
-        let mut found = Vec::new();
-        for segment in 0..disk_size.div_ceil(SEGMENT_BYTES) {
-            let path = dir.join(format!("data-{segment:05}"));
-            found.push(path.exists());
-            let file = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path)?;
-            let len = SEGMENT_BYTES.min(disk_size - segment * SEGMENT_BYTES);
-            if file.metadata()?.len() < len {
-                file.set_len(len)?;
-            }
-            segments.push(Arc::new(file));
+        let path = dir.join("data");
+        let found = path.exists();
+        let file = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path)?;
+        if file.metadata()?.len() < disk_size {
+            file.set_len(disk_size)?;
         }
-        let mut files = Self { chunk_size, segments, holes: true };
-        files.holes = files.punch_unlisted(&found, listed)?;
+        let mut files = Self { chunk_size, file: Arc::new(file), holes: true };
+        if found {
+            files.holes = files.punch_unlisted(listed)?;
+        }
         File::open(dir)?.sync_all()?;
         Ok(files)
     }
 
-    fn punch_unlisted(&self, found: &[bool], listed: &BTreeSet<usize>) -> Result<bool> {
-        let per_segment = (SEGMENT_BYTES / self.chunk_size) as usize;
-        for (segment, file) in self.segments.iter().enumerate().filter(|(segment, _)| found[*segment]) {
-            let first = segment * per_segment;
-            let len = file.metadata()?.len();
-            let mut start = 0;
-            for &index in listed.range(first..first + per_segment) {
-                let end = (index - first) as u64 * self.chunk_size;
-                if end > start && !punch(file, start, end - start)? {
-                    return Ok(false);
-                }
-                start = end + self.chunk_size;
-            }
-            if len > start && !punch(file, start, len - start)? {
+    fn punch_unlisted(&self, listed: &BTreeSet<usize>) -> Result<bool> {
+        let mut start = 0;
+        for &index in listed {
+            let end = index as u64 * self.chunk_size;
+            if end > start && !punch(&self.file, start, end - start)? {
                 return Ok(false);
             }
+            start = end + self.chunk_size;
         }
-        Ok(true)
+        let len = self.file.metadata()?.len();
+        Ok(len <= start || punch(&self.file, start, len - start)?)
     }
 
     /// True when a chunk that is not local reads as zeros.
@@ -74,16 +61,11 @@ impl DataFiles {
 
     /// The data file of a chunk, and the offset of the chunk in it.
     pub fn location(&self, index: usize) -> (&Arc<File>, u64) {
-        let offset = index as u64 * self.chunk_size;
-        (&self.segments[(offset / SEGMENT_BYTES) as usize], offset % SEGMENT_BYTES)
+        (&self.file, index as u64 * self.chunk_size)
     }
 
-    pub fn segment_of(&self, index: usize) -> usize {
-        (index as u64 * self.chunk_size / SEGMENT_BYTES) as usize
-    }
-
-    pub fn segment(&self, segment: usize) -> &Arc<File> {
-        &self.segments[segment]
+    pub fn file(&self) -> &Arc<File> {
+        &self.file
     }
 
     pub fn read_chunk(&self, index: usize) -> Result<Vec<u8>> {
@@ -122,8 +104,8 @@ impl DataFiles {
 
     /// Starts the write-back of a file without a wait, so that the next
     /// flush has less to write. Only the flush checks for write errors.
-    pub fn start_writeback(&self, segment: usize) {
-        let fd = self.segments[segment].as_raw_fd();
+    pub fn start_writeback(&self) {
+        let fd = self.file.as_raw_fd();
         unsafe { libc::sync_file_range(fd, 0, 0, libc::SYNC_FILE_RANGE_WRITE) };
     }
 }

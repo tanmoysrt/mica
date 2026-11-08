@@ -4,72 +4,59 @@
 
 <h1 align="center">mica</h1>
 
-<p align="center"><strong>Disks that follow your VMs and containers.</strong></p>
+<p align="center"><strong>Block devices whose data lives in an S3 bucket.</strong></p>
 
-mica gives a VM, container, or Linux server a disk it can use on any of your machines. Stop it on one machine and start it on another with the same files, without copying the whole disk first. mica fetches data as it is needed and saves changes in the background.
+mica gives a Linux machine a disk, `/dev/mica/<name>`, whose data lives in
+an S3 bucket. The machine keeps the newest writes and a cache on its local
+SSD, so reads and writes run at local speed. The bucket holds the full
+disk, so the disk can move to another machine, and its size has no limit
+but the bucket.
 
-The disk's shared copy lives in an S3-compatible bucket. Each machine uses its local SSD to keep reads and writes fast.
-
-## What you can do
-
-- **Move a workload between machines.** Detach its disk on one machine, then attach it on another. The new machine downloads only the data it reads.
-- **Start many VMs from one image.** Make a snapshot, then give each VM its own disk without copying the image's data.
-- **Use a disk like any other Linux disk.** Give it to a VM as a block device, or mount it for a host or container.
+- **Move a disk.** Detach it on one machine and attach it on another. The
+  new machine downloads only what it reads.
+- **Snapshots that cost nothing.** A snapshot names a version. A restore
+  makes a new disk from it, copied inside the bucket.
+- **A data disk for a VM.** Give `/dev/mica/<name>` to Firecracker, QEMU or
+  a container, or mount it on the host.
+- **A large disk for a laptop.** Mount it at each boot, and use it with no sudo.
 
 ## Quick start
 
-You need Linux 6.16 or later, systemd, an S3-compatible bucket, and a local SSD. To build mica, you also need Rust and libclang (`clang-devel` on Fedora; `libclang-dev` on Debian and Ubuntu).
+You need Linux 6.16 or later with `ublk_drv`, systemd, and an S3 bucket
+with conditional writes (AWS S3, Cloudflare R2, MinIO and RustFS have
+them). To build mica, you also need Rust and libclang.
 
 ```bash
 cargo install --git https://github.com/tanmoysrt/mica
-sudo ~/.cargo/bin/mica service setup  # configure storage and start mica
+sudo cp ~/.cargo/bin/mica /usr/local/bin/
+sudo mica service install
 
-sudo mica disk create data-1 --size 20G
-sudo mica disk mount data-1 /mnt/data-1
+cp store.example.toml ~/data.toml && chmod 600 ~/data.toml   # then fill in the bucket
+sudo mica --store ~/data.toml disk create data-1 --size 20G
+sudo mica --store ~/data.toml disk mount data-1 /mnt/data-1
 echo hello | sudo tee /mnt/data-1/hello.txt
 sudo mica disk unmount data-1
 ```
 
-On another machine running mica with the same bucket, mount the disk and read the file:
+On another machine with the same bucket file:
 
 ```bash
-sudo mica disk mount data-1 /mnt/data-1
-sudo cat /mnt/data-1/hello.txt
+sudo mica --store ~/data.toml disk mount data-1 /mnt/data-1
+cat /mnt/data-1/hello.txt
 ```
 
-Unmounting waits until the changes are saved to the bucket, so the disk is ready to move. For configuration and permissions, see the [operations guide](docs/operations.md).
-
-## How it works
-
-mica keeps a disk's data in a shared bucket and uses local storage for speed. It fetches data when needed and uploads changes in the background. When you detach a disk, mica finishes uploading before another machine uses it. See the [architecture guide](docs/architecture.md) for the full design.
-
-## Commands
-
-```text
-mica status                          show disks attached here
-mica disk      ls | create | attach | mount | unmount | detach | checkpoint | warm | set-limits | resize | delete
-mica snapshot  ls | create | delete
-mica gc                              remove unneeded data from the bucket
-mica cache     status | prune
-mica service   setup | start | stop | restart | status | logs | …
-```
-
-The [CLI reference](docs/cli.md) has examples and options for every command.
+`unmount` returns when the bucket has all data, so the disk is ready to move.
 
 ## Documentation
 
 | Page | What it covers |
 |---|---|
-| [Architecture](docs/architecture.md) | How reads, writes, snapshots, and uploads work |
-| [Reliability](docs/reliability.md) | Data safety and failure recovery |
-| [Design](docs/design.md) | Storage formats and design decisions |
-| [CLI](docs/cli.md) | Commands and examples |
-| [Operations](docs/operations.md) | Setup, configuration, permissions, and troubleshooting |
-| [Code map](src/code-map.md) | Where to find the implementation |
+| [How mica works](docs/design.md) | The layout in the bucket, writes, reads, transactions, snapshots, crashes |
+| [Running mica](docs/operations.md) | Install, commands, laptops, chunk sizes, problems |
 
 ## Project status
 
-mica is under development and should not be used for any production workload.
+mica is under development. Do not use it for data that you cannot lose.
 
 ## License
 

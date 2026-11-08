@@ -42,11 +42,12 @@ impl Rig {
     async fn attach(&self, name: &str) -> Arc<Disk> {
         let claim = Claim::take(self.store(name), &self.node, false).await.unwrap();
         let folder = DiskFolder::new(&self.root.join("data"), &self.root.join("run"), name);
-        folder.create(&crate::store::StoreConfig { endpoint: "memory".into(), bucket: "test".into(), ..Default::default() }).unwrap();
+        folder.create(&claim.head().id).unwrap();
         let tuning = Tuning {
-            transaction_interval: Duration::from_secs(3600),
-            transaction_after: 1 << 30,
+            transaction_interval: Duration::from_millis(20),
+            transaction_after: 8 * CHUNK,
             max_unsaved_age: Duration::from_secs(300),
+            keep_saved_local: 4 * CHUNK,
         };
         let cache = self.cache.for_disk(name, 64 * CHUNK);
         Disk::open(claim, &folder, cache, Transfers::new(), tuning).await.unwrap()
@@ -184,4 +185,147 @@ async fn local_chunks_come_back_after_a_crash() {
     assert!(disk.has_unsaved());
     rig.detach(disk).await;
     rig.check("crash").await;
+}
+
+/// A small random number generator, so that a failure repeats with its seed.
+struct Random(u64);
+
+impl Random {
+    fn below(&mut self, limit: u64) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0 % limit
+    }
+}
+
+/// Random partial writes, flushes, transactions and restarts of the daemon.
+/// After each step, the disk reads the same bytes as a plain array.
+#[tokio::test]
+async fn random_steps_never_change_what_the_disk_reads() {
+    const CHUNKS: u64 = 48;
+    for seed in 1..=6u64 {
+        let rig = Rig::new();
+        rig.create("model").await;
+        let mut disk = rig.attach("model").await;
+        let mut model = vec![0u8; (CHUNKS * CHUNK) as usize];
+        let mut random = Random(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        for step in 0..400 {
+            match random.below(10) {
+                0..=5 => {
+                    let offset = random.below(CHUNKS * CHUNK / 512) * 512;
+                    let len = ((random.below(3 * CHUNK / 512) + 1) * 512).min(CHUNKS * CHUNK - offset);
+                    let data = pattern((step % 251) as u8, len as usize);
+                    model[offset as usize..(offset + len) as usize].copy_from_slice(&data);
+                    disk.write(offset, data).await.unwrap();
+                }
+                6 => disk.flush().await.unwrap(),
+                7 | 8 => drop(disk.transaction(TransactionKind::All, None).await.unwrap()),
+                _ => {
+                    // A restart: the daemon exits after a flush, and the next one opens the folder.
+                    disk.flush().await.unwrap();
+                    drop(disk);
+                    disk = rig.attach("model").await;
+                    assert!(disk.read(0, model.len()).await.unwrap() == model, "seed {seed}, step {step}: lost at a restart");
+                }
+            }
+            if step % 25 == 0 {
+                let read = disk.read(0, model.len()).await.unwrap();
+                if let Some(at) = read.iter().zip(&model).position(|(a, b)| a != b) {
+                    panic!("seed {seed}, step {step}: byte {at} (chunk {}) differs", at as u64 / CHUNK);
+                }
+            }
+        }
+        rig.detach(disk).await;
+        let disk = rig.attach("model").await;
+        assert!(disk.read(0, model.len()).await.unwrap() == model, "seed {seed}: the store lost data");
+    }
+}
+
+/// Writes one block, on the fast path of the queue threads when it can.
+async fn write_block(disk: &Disk, offset: u64, data: Vec<u8>) {
+    if let Some(plan) = disk.plan_local_write(offset, data.len()) {
+        for (part, file, at) in &plan.parts {
+            std::os::unix::fs::FileExt::write_all_at(&**file, &data[part.buffer.clone()], *at).unwrap();
+        }
+        return plan.finish();
+    }
+    disk.write(offset, data).await.unwrap();
+}
+
+async fn read_block(disk: &Disk, offset: u64, len: usize) -> Vec<u8> {
+    if let Some(plan) = disk.plan_local_read(offset, len) {
+        let mut buffer = vec![0u8; len];
+        for (part, source) in &plan.parts {
+            if let fast::ReadSource::File(file, at) = source {
+                std::os::unix::fs::FileExt::read_exact_at(&**file, &mut buffer[part.buffer.clone()], *at).unwrap();
+            }
+        }
+        return buffer;
+    }
+    disk.read(offset, len).await.unwrap()
+}
+
+/// Four writers share chunks, but each owns its own blocks. Transactions,
+/// write-back and the eviction of saved chunks run at the same time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_writers_and_transactions_keep_every_block() {
+    const BLOCK: u64 = 4096;
+    const BLOCKS: u64 = 32 * CHUNK / BLOCK;
+    let rig = Rig::new();
+    rig.create("busy").await;
+    let disk = rig.attach("busy").await;
+    let transactions = tokio::spawn(disk.clone().run_transactions());
+    let writeback = tokio::spawn(disk.clone().run_writeback());
+    let mut writers = Vec::new();
+    for writer in 0..4u64 {
+        let disk = disk.clone();
+        writers.push(tokio::spawn(async move {
+            let mut model = std::collections::HashMap::new();
+            let mut random = Random((writer + 1).wrapping_mul(0x2545_F491_4F6C_DD1D));
+            for step in 0..1500u64 {
+                let block = random.below(BLOCKS / 4) * 4 + writer;
+                let data = pattern((step * 4 + writer) as u8, BLOCK as usize);
+                write_block(&disk, block * BLOCK, data.clone()).await;
+                assert!(read_block(&disk, block * BLOCK, BLOCK as usize).await == data, "writer {writer}, step {step}: block {block}");
+                model.insert(block, data);
+                if random.below(20) == 0 {
+                    disk.flush().await.unwrap();
+                }
+                if random.below(50) == 0 {
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                }
+            }
+            model
+        }));
+    }
+    let mut model = std::collections::HashMap::new();
+    for writer in writers {
+        model.extend(writer.await.unwrap());
+    }
+    let check = async |disk: &Disk, when: &str| {
+        for (block, data) in &model {
+            assert!(read_block(disk, block * BLOCK, BLOCK as usize).await == *data, "{when}: block {block} (chunk {})", block * BLOCK / CHUNK);
+        }
+    };
+    check(&disk, "after the writes").await;
+    disk.flush().await.unwrap();
+    disk.close();
+    transactions.abort();
+    writeback.abort();
+    drop(disk);
+    let disk = rig.attach("busy").await;
+    check(&disk, "after a restart").await;
+    rig.detach(disk).await;
+    let disk = rig.attach("busy").await;
+    check(&disk, "after a detach").await;
+    rig.detach(disk).await;
+    rig.check("busy").await;
+}
+
+#[tokio::test]
+async fn a_store_with_conditional_writes_passes_the_probe() {
+    let bucket = Bucket::in_memory();
+    bucket.check_conditional_writes().await.unwrap();
+    assert!(bucket.list("").await.unwrap().is_empty(), "the probe stays in the store");
 }

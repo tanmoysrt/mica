@@ -33,8 +33,9 @@ pub enum LocalState {
 struct StateFile {
     state: LocalState,
     ublk: Option<i32>,
-    /// The place of the store, to refuse a disk of the same name from another bucket.
-    place: String,
+    /// The `id` of the head. A disk with the same name from another bucket,
+    /// or a new disk with the name of a deleted one, has another id.
+    disk_id: String,
 }
 
 #[derive(Clone)]
@@ -70,13 +71,13 @@ impl DiskFolder {
 
     /// Makes the folder and syncs each folder on its path, so that a power
     /// loss cannot lose a folder that holds data.
-    pub fn create(&self, store: &StoreConfig) -> Result<()> {
+    pub fn create(&self, disk_id: &str) -> Result<()> {
         std::fs::create_dir_all(&self.path).with_context(|| format!("create {}", self.path.display()))?;
         for path in self.path.ancestors().filter(|path| !path.as_os_str().is_empty()) {
             File::open(path)?.sync_all()?;
         }
         if !self.exists() {
-            self.write_state(LocalState::Attached, None, &store.place())?;
+            self.write_state(LocalState::Attached, None, disk_id)?;
         }
         Ok(())
     }
@@ -85,8 +86,8 @@ impl DiskFolder {
         Ok(self.read_state()?.state)
     }
 
-    pub fn place(&self) -> Result<String> {
-        Ok(self.read_state()?.place)
+    pub fn disk_id(&self) -> Result<String> {
+        Ok(self.read_state()?.disk_id)
     }
 
     pub fn ublk(&self) -> Result<Option<i32>> {
@@ -95,12 +96,12 @@ impl DiskFolder {
 
     pub fn set_state(&self, state: LocalState) -> Result<()> {
         let old = self.read_state()?;
-        self.write_state(state, old.ublk, &old.place)
+        self.write_state(state, old.ublk, &old.disk_id)
     }
 
     pub fn set_ublk(&self, ublk: Option<i32>) -> Result<()> {
         let old = self.read_state()?;
-        self.write_state(old.state, ublk, &old.place)
+        self.write_state(old.state, ublk, &old.disk_id)
     }
 
     /// Keeps the credentials for a restart of mica. Root only.
@@ -134,10 +135,10 @@ impl DiskFolder {
     }
 
     /// A new file, synced, then renamed into place: a crash leaves the old or the new state.
-    fn write_state(&self, state: LocalState, ublk: Option<i32>, place: &str) -> Result<()> {
+    fn write_state(&self, state: LocalState, ublk: Option<i32>, disk_id: &str) -> Result<()> {
         let temp = self.path.join("state.new");
         let file = File::create(&temp)?;
-        serde_json::to_writer(&file, &StateFile { state, ublk, place: place.to_string() })?;
+        serde_json::to_writer(&file, &StateFile { state, ublk, disk_id: disk_id.to_string() })?;
         file.sync_all()?;
         std::fs::rename(&temp, self.path.join("state"))?;
         File::open(&self.path)?.sync_all()?;
