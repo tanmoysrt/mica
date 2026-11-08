@@ -31,9 +31,9 @@ pub enum ServiceCommand {
     RemoveDisk { disk: String },
 }
 
-pub fn run(command: ServiceCommand, config: &Path, store: Option<&Path>) -> Result<()> {
+pub fn run(command: ServiceCommand, config: &Path, store: &super::StoreArgs) -> Result<()> {
     match command {
-        ServiceCommand::AddDisk { disk, path } => add_disk(config, store, &disk, &path),
+        ServiceCommand::AddDisk { disk, path } => add_disk(config, &store.resolve()?, &disk, &path),
         ServiceCommand::RemoveDisk { disk } => {
             let _ = systemctl(&["disable", "--now", &format!("mica-disk-{disk}.service")]);
             let _ = std::fs::remove_file(format!("{DISKS}/{disk}.toml"));
@@ -79,16 +79,16 @@ fn install(config: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Copies the bucket file to /etc/mica/disks (root only) and writes a unit
+/// Writes the bucket of the disk to /etc/mica/disks (root only) and a unit
 /// that mounts the disk after mica starts.
-fn add_disk(config: &Path, store: Option<&Path>, disk: &str, path: &Path) -> Result<()> {
+fn add_disk(config: &Path, store: &crate::store::StoreConfig, disk: &str, path: &Path) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
     crate::store::validate_name(disk)?;
-    let Some(store) = store else { bail!("give the bucket of the disk with --store") };
-    crate::store::StoreConfig::load(Some(store))?;
     std::fs::create_dir_all(DISKS)?;
     let saved = format!("{DISKS}/{disk}.toml");
-    std::fs::copy(store, &saved).with_context(|| format!("copy {} (are you root?)", store.display()))?;
-    std::fs::set_permissions(&saved, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&saved);
+    let file = file.as_mut().map_err(|error| anyhow::anyhow!("write {saved} (are you root?): {error}"))?;
+    std::io::Write::write_all(file, toml::to_string(store)?.as_bytes())?;
     let (binary, path) = (std::env::current_exe()?.canonicalize()?, std::path::absolute(path)?);
     let user = std::env::var("SUDO_USER").unwrap_or_else(|_| "root".into());
     let unit = format!(

@@ -303,8 +303,9 @@ intervals.
 
 ## Credentials
 
-Each request that needs the bucket carries its credentials: a TOML file
-with `--store`, or the `S3_*` variables. The daemon keeps the credentials
+Each request that needs the bucket carries its credentials. The CLI takes
+each value from a flag, else from an `OBJECT_STORAGE_*` variable, else from
+the file of `--store` or `/etc/mica/store.toml`. The daemon keeps the credentials
 of an attached disk in memory and in `/run/mica/disks/<disk>/store.toml`,
 mode 0600, for a restart of the daemon. A reboot removes them.
 

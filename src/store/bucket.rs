@@ -13,50 +13,35 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Where a disk lives. Loaded from a TOML file or the environment.
+/// Where a disk lives. The CLI takes each value from a flag, a variable
+/// or a TOML file (see `cli::StoreArgs`), so a file can leave values out.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
 pub struct StoreConfig {
     pub endpoint: String,
     pub bucket: String,
-    #[serde(default)]
     pub prefix: String,
-    #[serde(default = "default_region")]
     pub region: String,
     pub access_key_id: String,
     pub secret_access_key: String,
 }
 
-fn default_region() -> String {
-    "auto".into()
-}
-
 impl StoreConfig {
-    /// Reads `path`, or without a path the variables `S3_ENDPOINT`,
-    /// `S3_BUCKET`, `S3_PREFIX`, `S3_REGION`, `S3_ACCESS_KEY_ID` and
-    /// `S3_SECRET_ACCESS_KEY`.
-    pub fn load(path: Option<&std::path::Path>) -> Result<Self> {
-        let config: Self = match path {
-            Some(path) => {
-                let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-                toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?
-            }
-            None => {
-                let var = |name: &str| std::env::var(name).unwrap_or_default();
-                Self {
-                    endpoint: var("S3_ENDPOINT"),
-                    bucket: var("S3_BUCKET"),
-                    prefix: var("S3_PREFIX"),
-                    region: Some(var("S3_REGION")).filter(|region| !region.is_empty()).unwrap_or_else(default_region),
-                    access_key_id: var("S3_ACCESS_KEY_ID"),
-                    secret_access_key: var("S3_SECRET_ACCESS_KEY"),
-                }
-            }
-        };
+    pub fn read(path: &std::path::Path) -> Result<Self> {
+        let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        toml::from_str(&text).with_context(|| format!("parse {}", path.display()))
+    }
+
+    /// Refuses a config without a bucket. A missing region is `auto`.
+    pub fn checked(mut self) -> Result<Self> {
         ensure!(
-            !config.endpoint.is_empty() && !config.bucket.is_empty(),
-            "no bucket: pass --store <file> or set S3_ENDPOINT and S3_BUCKET"
+            !self.endpoint.is_empty() && !self.bucket.is_empty(),
+            "no bucket: give --endpoint and --bucket, the OBJECT_STORAGE_* variables, or --store <file>"
         );
-        Ok(config)
+        if self.region.is_empty() {
+            self.region = "auto".into();
+        }
+        Ok(self)
     }
 
     /// Two configs with the same place reach the same disks.

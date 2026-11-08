@@ -31,17 +31,18 @@ cargo install --git https://github.com/tanmoysrt/mica
 sudo cp ~/.cargo/bin/mica /usr/local/bin/
 sudo mica service install
 
-cp store.example.toml ~/data.toml && chmod 600 ~/data.toml   # then fill in the bucket
-sudo mica --store ~/data.toml disk create data-1 --size 20G
-sudo mica --store ~/data.toml disk mount data-1 /mnt/data-1
+sudo cp store.example.toml /etc/mica/store.toml   # then fill in the bucket
+sudo chmod 600 /etc/mica/store.toml
+sudo mica disk create data-1 --size 20G
+sudo mica disk mount data-1 /mnt/data-1
 echo hello | sudo tee /mnt/data-1/hello.txt
 sudo mica disk unmount data-1
 ```
 
-On another machine with the same bucket file:
+On another machine with the same `/etc/mica/store.toml`:
 
 ```bash
-sudo mica --store ~/data.toml disk mount data-1 /mnt/data-1
+sudo mica disk mount data-1 /mnt/data-1
 cat /mnt/data-1/hello.txt
 ```
 

@@ -1,10 +1,9 @@
 //! The `mica` command line.
 //!
 //! Each command except `mica daemon` and `mica service` sends one request
-//! to the daemon. Commands on disks need the bucket of the disk: give a
-//! TOML file with `--store`, or set the variables `S3_ENDPOINT`,
-//! `S3_BUCKET`, `S3_PREFIX`, `S3_REGION`, `S3_ACCESS_KEY_ID` and
-//! `S3_SECRET_ACCESS_KEY`.
+//! to the daemon. Commands on disks need the bucket of the disk. Each of
+//! its values comes from a flag, else from its `OBJECT_STORAGE_*` variable,
+//! else from the TOML file of `--store` or `/etc/mica/store.toml`.
 
 mod mount;
 mod output;
@@ -23,12 +22,11 @@ use std::path::PathBuf;
 pub struct Cli {
     #[arg(long, global = true, default_value = crate::config::DEFAULT_PATH)]
     pub config: PathBuf,
-    /// The bucket of the disk, as a TOML file.
-    #[arg(long, global = true, env = "MICA_STORE")]
-    pub store: Option<PathBuf>,
     /// Print the answer of the daemon as JSON.
     #[arg(long, global = true)]
     pub json: bool,
+    #[command(flatten)]
+    pub store: StoreArgs,
     #[command(subcommand)]
     pub command: Command,
 }
@@ -120,6 +118,53 @@ pub enum SnapshotCommand {
     Delete { disk: String, name: String },
 }
 
+const DEFAULT_STORE: &str = "/etc/mica/store.toml";
+
+#[derive(Debug, Args)]
+#[command(next_help_heading = "Object storage")]
+pub struct StoreArgs {
+    /// A TOML file with the values below [default: /etc/mica/store.toml]
+    #[arg(long, global = true)]
+    store: Option<PathBuf>,
+    #[arg(long, global = true, env = "OBJECT_STORAGE_ENDPOINT")]
+    endpoint: Option<String>,
+    #[arg(long, global = true, env = "OBJECT_STORAGE_BUCKET")]
+    bucket: Option<String>,
+    /// The disks go under this path in the bucket.
+    #[arg(long, global = true, env = "OBJECT_STORAGE_PREFIX")]
+    prefix: Option<String>,
+    #[arg(long, global = true, env = "OBJECT_STORAGE_REGION")]
+    region: Option<String>,
+    #[arg(long, global = true, env = "OBJECT_STORAGE_ACCESS_KEY_ID")]
+    access_key_id: Option<String>,
+    /// Other users see a flag in `ps`: prefer the variable or the file.
+    #[arg(long, global = true, env = "OBJECT_STORAGE_SECRET_ACCESS_KEY", hide_env_values = true)]
+    secret_access_key: Option<String>,
+}
+
+impl StoreArgs {
+    /// Each value from the flag or the variable, else from the file.
+    pub fn resolve(&self) -> Result<StoreConfig> {
+        let default = PathBuf::from(DEFAULT_STORE);
+        let file = self.store.as_ref().or(default.exists().then_some(&default));
+        let mut config = file.map(|path| StoreConfig::read(path)).transpose()?.unwrap_or_default();
+        let values = [
+            (&self.endpoint, &mut config.endpoint),
+            (&self.bucket, &mut config.bucket),
+            (&self.prefix, &mut config.prefix),
+            (&self.region, &mut config.region),
+            (&self.access_key_id, &mut config.access_key_id),
+            (&self.secret_access_key, &mut config.secret_access_key),
+        ];
+        for (given, value) in values {
+            if let Some(given) = given {
+                value.clone_from(given);
+            }
+        }
+        config.checked()
+    }
+}
+
 #[derive(Debug, Args)]
 pub struct LimitArgs {
     /// Clean chunks kept on the node for this disk.
@@ -145,11 +190,11 @@ impl LimitArgs {
 }
 
 pub async fn run(cli: Cli, config: Config) -> Result<()> {
-    let store = || StoreConfig::load(cli.store.as_deref());
+    let store = || cli.store.resolve();
     let snapshots_only = matches!(cli.command, Command::Snapshot(_));
     let request = match cli.command {
         Command::Daemon => unreachable!("main runs the daemon"),
-        Command::Service(command) => return service::run(command, &cli.config, cli.store.as_deref()),
+        Command::Service(command) => return service::run(command, &cli.config, &cli.store),
         Command::Status => Request::Status,
         Command::Disk(DiskCommand::Ls) => Request::List { store: store()? },
         Command::Disk(DiskCommand::Info { disk }) => Request::Info { store: store()?, disk },
@@ -184,4 +229,19 @@ pub async fn run(cli: Cli, config: Config) -> Result<()> {
         false => output::print(&request, &result, snapshots_only),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_flag_beats_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("store.toml");
+        std::fs::write(&file, "endpoint = \"http://file\"\nbucket = \"from-file\"\n").unwrap();
+        let cli = Cli::try_parse_from(["mica", "--store", file.to_str().unwrap(), "--bucket", "from-flag", "status"]).unwrap();
+        let store = cli.store.resolve().unwrap();
+        assert_eq!((store.endpoint.as_str(), store.bucket.as_str(), store.region.as_str()), ("http://file", "from-flag", "auto"));
+    }
 }

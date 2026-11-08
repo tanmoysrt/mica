@@ -121,7 +121,7 @@ impl DiskFolder {
 
     /// `None` after a reboot.
     pub fn saved_store(&self) -> Option<StoreConfig> {
-        StoreConfig::load(Some(&self.run.join("store.toml"))).ok()
+        StoreConfig::read(&self.run.join("store.toml")).ok()
     }
 
     /// Deletes all local data of the disk. The cache stays.

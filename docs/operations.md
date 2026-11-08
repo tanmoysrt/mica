@@ -27,17 +27,26 @@ default.
 
 ## The bucket of a disk
 
-Each command that uses the bucket needs its credentials. Write them into
-a file, and keep it private:
+Each command that uses the bucket needs its place and its keys. mica
+takes each value from the first of these that gives it:
+
+1. A flag: `--endpoint`, `--bucket`, `--prefix`, `--region`,
+   `--access-key-id`, `--secret-access-key`.
+2. A variable: `OBJECT_STORAGE_ENDPOINT`, `OBJECT_STORAGE_BUCKET`,
+   `OBJECT_STORAGE_PREFIX`, `OBJECT_STORAGE_REGION`,
+   `OBJECT_STORAGE_ACCESS_KEY_ID`, `OBJECT_STORAGE_SECRET_ACCESS_KEY`.
+3. A TOML file: `--store <file>`, else `/etc/mica/store.toml` when it exists.
+
+A machine with one bucket keeps it in `/etc/mica/store.toml`, and needs no
+flags:
 
 ```bash
-cp store.example.toml ~/photos.toml
-chmod 600 ~/photos.toml
+sudo cp store.example.toml /etc/mica/store.toml
+sudo chmod 600 /etc/mica/store.toml      # then fill it in
 ```
 
-Then give the file with `--store ~/photos.toml`, or set `MICA_STORE`, or
-set the variables `S3_ENDPOINT`, `S3_BUCKET`, `S3_PREFIX`, `S3_REGION`,
-`S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY`.
+Do not give the secret key as a flag on a shared machine: other users see
+the flags of a process in `ps`.
 
 Two disks can use two buckets with two sets of credentials. The daemon
 keeps the credentials of an attached disk only in memory and in `/run`.
@@ -45,25 +54,24 @@ keeps the credentials of an attached disk only in memory and in `/run`.
 ## Use a disk
 
 ```bash
-export MICA_STORE=~/photos.toml
-sudo -E mica disk create photos --size 500G      # no space is used until it is written
-sudo -E mica disk mount photos /mnt/photos       # attach, format when new, mount
-sudo -E mica status
-sudo -E mica disk unmount photos                 # trim, unmount, upload all, detach
+sudo mica disk create photos --size 500G      # no space is used until it is written
+sudo mica disk mount photos /mnt/photos       # attach, format when new, mount
+sudo mica status
+sudo mica disk unmount photos                 # trim, unmount, upload all, detach
 ```
 
 On another node with the same bucket file:
 
 ```bash
-sudo -E mica disk mount photos /mnt/photos
+sudo mica disk mount photos /mnt/photos
 ```
 
 For a VM, attach the disk and give the device to the VM:
 
 ```bash
-sudo -E mica disk attach vm-data                 # makes /dev/mica/vm-data
+sudo mica disk attach vm-data                 # makes /dev/mica/vm-data
 firecracker ...  # drive path_on_host = /dev/mica/vm-data
-sudo -E mica disk detach vm-data                 # after the VM stops
+sudo mica disk detach vm-data                 # after the VM stops
 ```
 
 The main use is a data disk: the VM boots from a local root disk, and the
