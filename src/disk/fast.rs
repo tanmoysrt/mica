@@ -65,14 +65,14 @@ impl Disk {
 
     /// `None` means that the tokio side must do the write.
     pub fn plan_local_write(&self, offset: u64, len: usize) -> Option<LocalWrite<'_>> {
-        if self.is_stopped() || !self.has_room() {
+        if self.is_stopped() {
             return None;
         }
         let mut parts = Vec::new();
         let mut locks = Vec::new();
         for part in self.split(offset, len).ok()? {
             let slot = self.slots.loaded(part.index)?.try_write_owned().ok()?;
-            if !slot.local {
+            if !slot.local || (!slot.unsaved && !self.has_room_for(part.index)) {
                 return None;
             }
             let (file, start) = self.data.location(part.index);

@@ -61,11 +61,10 @@ impl RequestBuffer<'_> {
                 opcode::WriteFixed::new(fd, source, left, self.tag).offset(offset + done as u64).build()
             })
         });
-        if !futures::future::join_all(writes).await.iter().all(|ok| *ok) {
-            return -libc::EIO;
-        }
+        let done = futures::future::join_all(writes).await;
+        // Also after a failed part: the parts that worked changed the chunks.
         plan.finish();
-        len as i32
+        if done.iter().all(|ok| *ok) { len as i32 } else { -libc::EIO }
     }
 
     /// Copies data into the request, for a read that tokio served.

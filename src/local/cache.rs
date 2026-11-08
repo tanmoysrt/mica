@@ -73,18 +73,7 @@ impl NodeCache {
         let mut state = State::default();
         for disk in std::fs::read_dir(&root)? {
             let disk = disk?;
-            let name = disk.file_name().to_string_lossy().into_owned();
-            for prefix in std::fs::read_dir(disk.path())? {
-                for file in std::fs::read_dir(prefix?.path())? {
-                    let file = file?;
-                    let file_name = file.file_name().to_string_lossy().into_owned();
-                    match Hash::from_hex(&file_name) {
-                        Some(hash) => state.add(&name, hash, file.metadata()?.len(), false),
-                        // A file that a crash left half written.
-                        None => drop(std::fs::remove_file(file.path())),
-                    }
-                }
-            }
+            state.scan(&disk.file_name().to_string_lossy(), &disk.path())?;
         }
         Ok(Arc::new(Self { root, state: Mutex::new(state) }))
     }
@@ -123,6 +112,21 @@ impl NodeCache {
 }
 
 impl State {
+    /// Adds the files of one disk folder, unverified.
+    fn scan(&mut self, disk: &str, folder: &Path) -> Result<()> {
+        for prefix in std::fs::read_dir(folder)? {
+            for file in std::fs::read_dir(prefix?.path())? {
+                let file = file?;
+                match Hash::from_hex(&file.file_name().to_string_lossy()) {
+                    Some(hash) => self.add(disk, hash, file.metadata()?.len(), false),
+                    // A temporary file that a crash left.
+                    None => drop(std::fs::remove_file(file.path())),
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn add(&mut self, disk: &str, hash: Hash, bytes: u64, verified: bool) {
         self.clock += 1;
         let used = self.clock;
@@ -137,10 +141,15 @@ impl State {
         self.owners.entry(hash).or_insert_with(|| disk.to_string());
     }
 
+    /// Another disk that has the file becomes its owner, so links stay possible.
     fn forget_owner(&mut self, hash: &Hash, disk: &str) {
-        if self.owners.get(hash).is_some_and(|owner| owner == disk) {
-            self.owners.remove(hash);
+        if self.owners.get(hash).is_none_or(|owner| owner != disk) {
+            return;
         }
+        match self.disks.iter().find(|(other, index)| *other != disk && index.files.contains_key(hash)) {
+            Some((other, _)) => self.owners.insert(*hash, other.clone()),
+            None => self.owners.remove(hash),
+        };
     }
 
     /// Marks a file as used now. Returns whether it is verified.
@@ -185,7 +194,18 @@ impl ChunkCache {
     pub fn open(&self, hash: &Hash) -> Result<Option<File>> {
         let verified = self.node.state().touch(&self.disk, hash);
         match verified {
-            Some(true) => return Ok(Some(File::open(self.path(hash))?)),
+            // An eviction can remove the file after the touch: then it is a miss.
+            Some(true) => match File::open(self.path(hash)) {
+                Ok(file) => return Ok(Some(file)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    // Another thread can add the file again before the lock: keep its entry.
+                    let mut state = self.node.state();
+                    if !self.path(hash).exists() {
+                        state.remove(&self.disk, hash);
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            },
             Some(false) => {
                 if let Some(file) = self.check(&self.path(hash), hash)? {
                     self.add(hash, true);
@@ -330,6 +350,28 @@ mod tests {
         assert!(!b.has(&hash));
         assert!(b.open(&hash).unwrap().is_some());
         assert!(b.has(&hash));
+    }
+
+    #[test]
+    fn a_shared_chunk_stays_linkable_after_its_first_disk_drops_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = NodeCache::load(dir.path().to_path_buf()).unwrap();
+        let (a, b, c) = (node.for_disk("a", 1 << 20), node.for_disk("b", 1 << 20), node.for_disk("c", 1 << 20));
+        let hash = put(&a, b"block");
+        b.open(&hash).unwrap();
+        node.remove_disk("a");
+        assert!(c.open(&hash).unwrap().is_some(), "c links the file of b");
+    }
+
+    #[test]
+    fn a_file_gone_from_under_the_index_is_a_miss() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = NodeCache::load(dir.path().to_path_buf()).unwrap();
+        let cache = node.for_disk("a", 1 << 20);
+        let hash = put(&cache, b"block");
+        std::fs::remove_file(cache.path(&hash)).unwrap();
+        assert!(cache.open(&hash).unwrap().is_none());
+        assert!(!cache.has(&hash));
     }
 
     #[test]

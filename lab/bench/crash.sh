@@ -28,7 +28,9 @@ ROOT=(sudo -n /usr/local/sbin/mica-lab-root)
 IO=$LAB/crash/crashio.py
 mica() { "${ROOT[@]}" crash-cli "$@"; }
 STORE=$LAB/crash/store.toml
-WORK=$OUT/work
+# One folder per mode, emptied first: the writer appends to its run log.
+WORK=$OUT/work-${MODE:-power}
+rm -f "$WORK"/run-*.log
 mkdir -p "$WORK"
 exec > >(tee -a "$OUT/crash.log") 2>&1
 

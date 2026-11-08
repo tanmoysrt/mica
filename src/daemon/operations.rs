@@ -50,11 +50,11 @@ impl Daemon {
             None => self.buckets.all(),
         };
         ensure!(!stores.is_empty(), "this machine knows no bucket yet: {}", super::buckets::no_bucket_hint());
-        let mut disks = Vec::new();
+        let (status, mut disks) = (self.status().await, Vec::new());
         for store in &stores {
             for mut disk in self.list_bucket(store).await? {
                 disk["bucket"] = store.place().into();
-                disk["local"] = self.local_state(&disk).await;
+                disk["local"] = local_state(&status, &disk);
                 disk["cache_bytes"] = self.cache.bytes(disk["disk"].as_str().unwrap_or_default()).into();
                 disks.push(disk);
             }
@@ -81,14 +81,8 @@ impl Daemon {
         let disk = self.locate(store, name).await?;
         let mut info = describe(name, &disk.require_head().await?.head);
         info["bucket"] = disk.bucket.place.clone().into();
-        info["local"] = self.local_state(&info).await;
+        info["local"] = local_state(&self.status().await, &info);
         Ok(info)
-    }
-
-    async fn local_state(&self, disk: &Value) -> Value {
-        let status = self.status().await;
-        let here = status["disks"].as_array().into_iter().flatten().find(|attached| attached["disk"] == disk["disk"] && attached["bucket"] == disk["bucket"]);
-        here.cloned().unwrap_or_default()
     }
 
     /// Takes a snapshot. On an attached disk, it is a transaction of all
@@ -286,4 +280,10 @@ fn describe(name: &str, head: &Head) -> Value {
         "snapshots": snapshots,
         "deleted": head.deleted,
     })
+}
+
+/// The entry of a disk in `status` when it is attached here, else null.
+fn local_state(status: &Value, disk: &Value) -> Value {
+    let here = status["disks"].as_array().into_iter().flatten().find(|attached| attached["disk"] == disk["disk"] && attached["bucket"] == disk["bucket"]);
+    here.cloned().unwrap_or_default()
 }

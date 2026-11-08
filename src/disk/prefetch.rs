@@ -139,7 +139,10 @@ impl Disk {
         let in_flight = (FILL_BYTES_IN_FLIGHT / self.chunk_size).clamp(1, 32) as usize;
         let mut fetched = 0usize;
         for (page, entry) in root.pages.iter().enumerate() {
-            if self.is_closed() || self.cache.nearly_full() || entry.is_zero() {
+            if self.is_closed() || self.cache.nearly_full() {
+                break;
+            }
+            if entry.is_zero() {
                 continue;
             }
             let Ok(chunks) = self.store.page(entry, page).await else { break };

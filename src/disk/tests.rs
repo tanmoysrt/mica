@@ -124,6 +124,21 @@ async fn the_status_of_a_disk_with_unsaved_data_returns() {
 }
 
 #[tokio::test]
+async fn at_the_unsaved_limit_a_write_into_an_unsaved_chunk_does_not_wait() {
+    let rig = Rig::new();
+    rig.create("web").await;
+    let disk = rig.attach("web").await;
+    disk.set_limits(Limits { cache_bytes: 4 * CHUNK, unsaved_bytes: 2 * CHUNK, interval_seconds: 3600 });
+    disk.write(0, pattern(1, 4096)).await.unwrap();
+    disk.write(CHUNK, pattern(2, 4096)).await.unwrap();
+    let again = tokio::time::timeout(std::time::Duration::from_secs(2), disk.write(100, pattern(3, 4096)));
+    again.await.expect("the write waited for room").unwrap();
+    assert!(disk.plan_local_write(200, 4096).is_some(), "the queue thread serves it too");
+    assert!(disk.plan_local_write(2 * CHUNK, 4096).is_none(), "a new chunk must wait");
+    rig.detach(disk).await;
+}
+
+#[tokio::test]
 async fn snapshots_keep_their_objects_until_the_merge() {
     let rig = Rig::new();
     rig.create("db").await;

@@ -12,15 +12,18 @@
 //!   chunks stay local up to the cache budget, because the guest often
 //!   writes them again. Then they move into the cache.
 //!
-//! The code is in four files: `io.rs` (read, write, flush), `fast.rs` (the
-//! requests that a queue thread serves alone), `transaction.rs` and
-//! `prefetch.rs`.
+//! The files: `io.rs` (read, write, flush), `fast.rs` (the requests that a
+//! queue thread serves alone), `clean.rs` (cache and downloads), `saved.rs`
+//! (saved chunks), `transaction.rs` and `upload.rs`, and `prefetch.rs`.
 
+mod clean;
 mod fast;
 mod io;
 pub mod prefetch;
+mod saved;
 mod slots;
 mod transaction;
+mod upload;
 #[cfg(test)]
 mod tests;
 
@@ -31,7 +34,7 @@ use crate::local::{ChunkCache, DataFiles, DirtyLog, DiskFolder};
 use crate::owner::Claim;
 use crate::store::{DiskStore, Limits, Root};
 use crate::transfers::Transfers;
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use prefetch::{ReadAhead, ReadProfile};
 use serde::Serialize;
 use slots::{ChunkMap, Slot};
@@ -328,6 +331,10 @@ impl Disk {
         Ok(parts)
     }
 
+    fn missing(&self, index: usize) -> anyhow::Error {
+        anyhow!("disk {}: chunk {index} is not loaded", self.name)
+    }
+
     fn unsaved_limit(&self) -> usize {
         (self.limits.lock().unwrap().unsaved_bytes / self.chunk_size).max(2) as usize
     }
@@ -337,17 +344,20 @@ impl Disk {
         self.unsaved.lock().unwrap().len() >= self.unsaved_limit() / 2 || self.is_behind()
     }
 
-    fn has_room(&self) -> bool {
-        self.unsaved.lock().unwrap().len() < self.unsaved_limit()
+    /// A write into an unsaved chunk adds no unsaved data, so it always has room.
+    fn has_room_for(&self, index: usize) -> bool {
+        let limit = self.unsaved_limit();
+        let unsaved = self.unsaved.lock().unwrap();
+        unsaved.len() < limit || unsaved.contains(&index)
     }
 
     /// Writes wait at the unsaved limit until a transaction makes room. The
     /// guest sees a slow disk, not an error.
-    async fn wait_for_room(&self) -> Result<()> {
+    async fn wait_for_room(&self, index: usize) -> Result<()> {
         loop {
             let room = self.room.notified();
             self.ensure_usable()?;
-            if self.has_room() {
+            if self.has_room_for(index) {
                 return Ok(());
             }
             self.transaction_wanted.notify_one();
