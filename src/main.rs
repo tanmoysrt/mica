@@ -33,6 +33,9 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = config::Config::load(&cli.config)?;
     if let Command::Daemon = cli.command {
+        if unsafe { libc::geteuid() } != 0 {
+            bail!("the daemon needs root: run `sudo mica service install`, which starts it now and at each boot");
+        }
         // Before tokio starts its threads: unshare fails in a process with threads.
         isolate_mount_namespace()?;
         raise_open_file_limit();

@@ -96,9 +96,13 @@ async fn run(daemon: &Arc<Daemon>, request: Request) -> Result<Value> {
 
 /// Sends one request to the daemon and returns its result.
 pub async fn call(socket: &Path, request: &Request) -> Result<Value> {
-    let stream = UnixStream::connect(socket)
-        .await
-        .with_context(|| format!("connect to {} (is mica running, and are you root?)", socket.display()))?;
+    let stream = UnixStream::connect(socket).await.map_err(|error| match error.kind() {
+        std::io::ErrorKind::PermissionDenied => anyhow::anyhow!("only root can talk to mica: run the command with sudo"),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
+            anyhow::anyhow!("mica is not running: start it with `sudo mica service install`")
+        }
+        _ => anyhow::Error::new(error).context(format!("connect to {}", socket.display())),
+    })?;
     let (reader, mut writer) = stream.into_split();
     let mut text = serde_json::to_string(request)?;
     text.push('\n');

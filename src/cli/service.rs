@@ -17,11 +17,11 @@ const UNIT: &str = "/etc/systemd/system/mica.service";
 
 #[derive(Debug, Subcommand)]
 pub enum ServiceCommand {
-    /// Write the unit, then start mica and start it at boot.
+    /// Start mica now and at each boot.
     Install,
-    /// Stop mica and remove the unit. Refused while disks are attached.
+    /// Stop mica and remove it from the boot. Refused while disks are attached.
     Uninstall,
-    /// Show the state of mica.service.
+    /// Show whether mica runs, and its last log lines.
     Status,
 }
 
