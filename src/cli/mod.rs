@@ -62,12 +62,7 @@ pub enum DiskCommand {
         limits: LimitArgs,
     },
     /// Make /dev/mica/<disk> on this node.
-    Attach {
-        disk: String,
-        /// Take the disk from another node. Only when that node is off.
-        #[arg(long)]
-        force: bool,
-    },
+    Attach { disk: String },
     /// Save all data in the bucket, and give the disk free for other nodes.
     Detach { disk: String },
     /// Change the size or the limits of a disk. They follow the disk between nodes.
@@ -80,12 +75,7 @@ pub enum DiskCommand {
         limits: LimitArgs,
     },
     /// Delete a disk and all its snapshots.
-    Delete {
-        disk: String,
-        /// Delete it also when another node has it attached.
-        #[arg(long)]
-        force: bool,
-    },
+    Delete { disk: String },
     /// Make a new disk from a snapshot.
     Restore { disk: String, snapshot: String, new_disk: String },
 }
@@ -184,12 +174,12 @@ pub async fn run(cli: Cli, config: Config) -> Result<()> {
             chunk_size: chunk_size.as_deref().map(parse_size).transpose()?,
             limits: limits.request()?,
         },
-        Command::Disk(DiskCommand::Attach { disk, force }) => Request::Attach { store: store()?, disk, force },
+        Command::Disk(DiskCommand::Attach { disk }) => Request::Attach { store: store()?, disk },
         Command::Disk(DiskCommand::Detach { disk }) => Request::Detach { disk },
         Command::Disk(DiskCommand::Set { disk, size, limits }) => {
             Request::Set { store: store()?, disk, size: size.as_deref().map(parse_size).transpose()?, limits: limits.request()? }
         }
-        Command::Disk(DiskCommand::Delete { disk, force }) => Request::Delete { store: store()?, disk, force },
+        Command::Disk(DiskCommand::Delete { disk }) => Request::Delete { store: store()?, disk },
         Command::Disk(DiskCommand::Restore { disk, snapshot, new_disk }) => {
             Request::Restore { store: store()?, disk, snapshot, target: new_disk }
         }

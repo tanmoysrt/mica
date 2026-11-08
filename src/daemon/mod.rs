@@ -80,7 +80,7 @@ impl Daemon {
 
     /// Attaches a disk on this node, and returns its device. A disk that is
     /// attached here already gives its device again.
-    pub async fn attach(&self, store: &StoreConfig, name: &str, force: bool) -> Result<Value> {
+    pub async fn attach(&self, store: &StoreConfig, name: &str) -> Result<Value> {
         validate_name(name)?;
         let lock = self.lock(name);
         let _one_at_a_time = lock.lock().await;
@@ -95,7 +95,7 @@ impl Daemon {
             bail!("disk {name} has orphaned local data in {}: copy it out, then delete the folder", folder.path.display());
         }
         let store_handle = DiskStore::new(Arc::new(Bucket::connect(store)?), name);
-        let mut claim = Claim::take(store_handle, &self.node, force).await?;
+        let mut claim = Claim::take(store_handle, &self.node).await?;
         if let Err(error) = check_folder(&folder, &claim) {
             let _ = claim.release().await;
             return Err(error);
@@ -206,7 +206,7 @@ impl Daemon {
             log::error!("disk {}: {reason}: the local data in {} is kept as orphaned", folder.disk, folder.path.display());
             return remove_paused(paused).await;
         }
-        let mut claim = Claim::take(store, &self.node, false).await?;
+        let mut claim = Claim::take(store, &self.node).await?;
         if let Err(error) = check_folder(folder, &claim) {
             log::error!("disk {}: {error:#}", folder.disk);
             let _ = claim.release().await;

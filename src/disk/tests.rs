@@ -6,7 +6,7 @@
 use super::*;
 use crate::local::NodeCache;
 use crate::owner::{Claim, NodeId};
-use crate::store::{Bucket, DiskStore, Head, Limits};
+use crate::store::{Bucket, DiskStore, Head, Limits, Owner};
 use std::collections::BTreeSet;
 
 const CHUNK: u64 = 64 << 10;
@@ -40,7 +40,7 @@ impl Rig {
     }
 
     async fn attach(&self, name: &str) -> Arc<Disk> {
-        let claim = Claim::take(self.store(name), &self.node, false).await.unwrap();
+        let claim = Claim::take(self.store(name), &self.node).await.unwrap();
         let folder = DiskFolder::new(&self.root.join("data"), &self.root.join("run"), name);
         folder.create(&claim.head().id).unwrap();
         let cache = self.cache.for_disk(name, 64 * CHUNK);
@@ -148,20 +148,22 @@ async fn a_snapshot_of_an_unchanged_disk_names_the_current_version() {
 }
 
 #[tokio::test]
-async fn a_forced_claim_stops_the_old_owner() {
+async fn a_changed_head_stops_the_owner() {
     let rig = Rig::new();
     rig.create("moved").await;
     let disk = rig.attach("moved").await;
     disk.write(0, pattern(1, 4096)).await.unwrap();
     let other = NodeId { hostname: "other".into(), id: "node-b".into() };
-    assert!(Claim::take(rig.store("moved"), &other, false).await.is_err());
-    let mut taken = Claim::take(rig.store("moved"), &other, true).await.unwrap();
+    assert!(Claim::take(rig.store("moved"), &other).await.is_err());
+    // Another writer of the head, such as an orchestrator, gives the disk to another node.
+    let store = rig.store("moved");
+    let current = store.require_head().await.unwrap();
+    let mut moved = current.head.clone();
+    moved.owner = Some(Owner { node: other.hostname.clone(), id: other.id.clone(), since: 0 });
+    store.replace_head(&current, moved).await.unwrap();
     assert!(disk.transaction(TransactionKind::All, None).await.is_err());
     assert!(disk.is_stopped());
     assert!(disk.read(0, 4096).await.is_err());
-    // The new owner deletes the folder of the old owner at its release.
-    taken.release().await.unwrap();
-    rig.check("moved").await;
 }
 
 #[tokio::test]
@@ -318,10 +320,11 @@ async fn concurrent_writers_and_transactions_keep_every_block() {
 }
 
 #[tokio::test]
-async fn a_store_with_conditional_writes_passes_the_probe() {
+async fn the_probe_finds_the_conditional_writes_of_a_store() {
     let bucket = Bucket::in_memory();
-    bucket.check_conditional_writes().await.unwrap();
+    assert!(bucket.check_conditional_writes().await.unwrap());
     assert!(bucket.list("").await.unwrap().is_empty(), "the probe stays in the store");
+    assert!(!Bucket::in_memory_without_conditions().check_conditional_writes().await.unwrap());
 }
 
 #[tokio::test]

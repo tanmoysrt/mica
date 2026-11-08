@@ -9,9 +9,12 @@ when something goes wrong. [design.md](design.md) explains how mica works.
   and user-recovery features of ublk.
 - systemd, and root for the daemon.
 - A local SSD for `/var/lib/mica`.
-- An S3 bucket with conditional writes (`If-Match` and `If-None-Match`).
-  AWS S3, Cloudflare R2, MinIO and RustFS have them. `mica disk create`
-  checks the bucket first, and refuses a bucket without them.
+- An S3 bucket, best with conditional writes (`If-Match` and
+  `If-None-Match`): AWS S3, Cloudflare R2, MinIO and RustFS have them.
+  `mica disk create` checks the bucket first. A bucket that ignores them,
+  such as Garage, works, but mica cannot stop two nodes from using one disk
+  there: attach each disk on one node only. A bucket that refuses them,
+  such as Backblaze B2, cannot hold mica disks.
 
 ## Install
 
@@ -93,11 +96,11 @@ mica disk.
 | `mica disk ls` | The disks in the bucket |
 | `mica disk info <disk>` | One disk, its limits and snapshots |
 | `mica disk create <disk> --size 20G [--chunk-size 1M] [--cache-size 512M] [--unsaved-size 4G] [--interval 5m]` | A new, empty disk |
-| `mica disk attach <disk> [--force]` | Makes `/dev/mica/<disk>`. `--force` takes the disk from a node that is off. |
+| `mica disk attach <disk>` | Makes `/dev/mica/<disk>` |
 | `mica disk detach <disk>` | Uploads all data and gives the disk free |
 | `mica disk set <disk> [--size] [--cache-size] [--unsaved-size] [--interval]` | New limits, or a larger size (detached only) |
 | `mica disk restore <disk> <snapshot> <new disk>` | A new disk from a snapshot |
-| `mica disk delete <disk> [--force]` | Deletes the disk and its snapshots |
+| `mica disk delete <disk>` | Deletes the disk and its snapshots. Refused while another node has it. |
 | `mica snapshot create / delete <disk> <name>` | Snapshots. A create uploads all changes first. |
 | `mica service install / uninstall / status` | The systemd unit `mica.service` |
 
@@ -154,11 +157,12 @@ mount with `nofail` does not stop the boot: mount it when the disk is back.
 
 | Message | Meaning | What to do |
 |---|---|---|
-| `disk … is attached on <node>` | Another node owns the disk | Detach it there. When that node is gone for good, use `--force`. |
-| `stopped: another node took the disk` | A forced attach took the disk | The local data is kept as orphaned in `/var/lib/mica/disks/<disk>`. Copy out what you need, then delete the folder. |
+| `disk … is attached on <node>` | Another node owns the disk | Detach it there. |
+| `stopped: another node took the disk` | Somebody else changed the head of the disk | The local data is kept as orphaned in `/var/lib/mica/disks/<disk>`. Copy out what you need, then delete the folder. |
 | `… has orphaned local data` | The folder holds data that is not in the bucket | Same as above. |
 | `the local data … is of another disk` | A disk with this name was deleted and made again | The old data is kept as orphaned. |
-| `this store cannot hold mica disks` | The bucket ignores conditional writes | Use another bucket or provider. |
+| `this store cannot hold mica disks` | The bucket refuses conditional writes | Use another bucket or provider. |
+| `Warning: this store ignores conditional writes` | The bucket accepts the conditions but does not keep them | Attach the disk on one node only. |
 | `upload is behind` in `mica status` | Unsaved data missed three transactions | Check the network and the bucket. Writes wait at the unsaved limit. |
 | `stopped: a local sync failed` | The local SSD failed a write | The disk refuses I/O. Check the SSD. |
 | `not served yet, tried again` in the log | At start, the bucket could not be reached | mica tries again every 10 seconds. Check the network. |

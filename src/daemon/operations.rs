@@ -23,6 +23,8 @@ use std::sync::Arc;
 
 const PARALLEL: usize = 64;
 
+const NO_CONDITIONS: &str = "this store ignores conditional writes, so mica cannot stop two nodes from using the disk at once: attach it on one node only";
+
 impl Daemon {
     pub async fn create(&self, store: &StoreConfig, name: &str, size: u64, chunk_size: Option<u64>, limits: LimitsRequest) -> Result<Value> {
         validate_name(name)?;
@@ -32,9 +34,10 @@ impl Daemon {
         let size = size.next_multiple_of(chunk_size);
         let limits = limits.apply(Limits::DEFAULT, chunk_size)?;
         let disk = DiskStore::new(Arc::new(Bucket::connect(store)?), name);
-        disk.bucket.check_conditional_writes().await?;
+        let conditions = disk.bucket.check_conditional_writes().await?;
         disk.create_head(&Head::new(size, chunk_size, limits, None)).await?;
-        Ok(json!({ "disk": name, "size": size, "chunk_size": chunk_size }))
+        let warning = (!conditions).then_some(NO_CONDITIONS);
+        Ok(json!({ "disk": name, "size": size, "chunk_size": chunk_size, "warning": warning }))
     }
 
     /// Lists the disks of a bucket: one listing, then one read of each head.
@@ -161,13 +164,13 @@ impl Daemon {
 
     /// Deletes a disk and all its snapshots. A crash leaves the head marked
     /// as deleted, and the same command finishes the delete.
-    pub async fn delete(&self, store: &StoreConfig, name: &str, force: bool) -> Result<Value> {
+    pub async fn delete(&self, store: &StoreConfig, name: &str) -> Result<Value> {
         if self.attached(name).await.is_some() {
             bail!("disk {name} is attached here: detach it first");
         }
         let disk = DiskStore::new(Arc::new(Bucket::connect(store)?), name);
         let current = disk.require_head().await?;
-        if let Some(owner) = current.head.owner.as_ref().filter(|owner| owner.id != self.node.id && !force) {
+        if let Some(owner) = current.head.owner.as_ref().filter(|owner| owner.id != self.node.id) {
             bail!("disk {name} is attached on {}", owner.node);
         }
         if !current.head.deleted {
@@ -190,7 +193,7 @@ impl Daemon {
             return operation(&mut *disk.claim().await).await;
         }
         let disk = DiskStore::new(Arc::new(Bucket::connect(store)?), name);
-        let mut claim = Claim::take(disk, &self.node, false).await?;
+        let mut claim = Claim::take(disk, &self.node).await?;
         let result = operation(&mut claim).await;
         let released = claim.release().await;
         let value = result?;

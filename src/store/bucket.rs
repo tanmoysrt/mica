@@ -3,7 +3,7 @@
 //! Each disk names its own bucket: the user passes the credentials with
 //! each command, and the daemon keeps them only for the disks it serves.
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 use futures::{StreamExt, TryStreamExt};
 use object_store::aws::AmazonS3Builder;
@@ -142,23 +142,24 @@ impl Bucket {
         Ok(Some((data, tag)))
     }
 
-    /// mica locks a disk with conditional writes. A store that ignores the
-    /// conditions would let two nodes write one disk, so it is refused.
-    pub async fn check_conditional_writes(&self) -> Result<()> {
+    /// Whether the store keeps the conditions of a write. mica locks a disk
+    /// with them. A store that ignores them, as Garage does, still works,
+    /// but cannot stop two nodes from using one disk. A store that refuses
+    /// them cannot hold mica disks.
+    pub async fn check_conditional_writes(&self) -> Result<bool> {
         let key = format!("probe-{}", crate::store::head::random_id());
         // A plain write first, so that a login or network error shows as itself.
-        let Written::Done(tag) = self.put_with(&key, "1".into(), PutMode::Overwrite).await.context("write a probe object")? else {
-            bail!("write a probe object: the store refused it")
-        };
+        self.put(&key, "1").await.context("write a probe object")?;
         let result = async {
-            ensure!(matches!(self.put_new(&key, "2").await?, Written::Conflict), "the store ignores If-None-Match");
-            ensure!(matches!(self.put_if_match(&key, "3", "\"wrong\"").await?, Written::Conflict), "the store ignores If-Match");
+            let keeps_none_match = matches!(self.put_new(&key, "2").await?, Written::Conflict);
+            let keeps_match = matches!(self.put_if_match(&key, "3", "\"wrong\"").await?, Written::Conflict);
+            let (_, tag) = self.get_tagged(&key).await?.context("the probe object is gone")?;
             ensure!(matches!(self.put_if_match(&key, "4", &tag).await?, Written::Done(_)), "the store refuses a correct If-Match");
-            Ok(())
+            Ok(keeps_none_match && keeps_match)
         }
         .await;
         let _ = self.delete_all(vec![key]).await;
-        result.context("this store cannot hold mica disks: it needs conditional writes")
+        result.context("this store cannot hold mica disks: it refuses conditional writes")
     }
 
     pub async fn put(&self, key: &str, data: impl Into<Bytes>) -> Result<()> {

@@ -52,22 +52,19 @@ pub struct Claim {
 }
 
 impl Claim {
-    /// Takes the disk. `force` takes it from another node: use it only when
-    /// that node is off. An old owner that still runs fails at its next
-    /// write of the head, so it can never commit again.
-    pub async fn take(store: DiskStore, node: &NodeId, force: bool) -> Result<Self> {
+    /// Takes a disk that no other node holds.
+    pub async fn take(store: DiskStore, node: &NodeId) -> Result<Self> {
         let current = store.require_head().await?;
         let head = &current.head;
         if head.deleted {
             bail!("disk {} is being deleted: run `mica disk delete` to finish", store.disk);
         }
-        let other = head.owner.as_ref().filter(|owner| owner.id != node.id);
-        if let (Some(owner), false) = (other, force) {
+        if let Some(owner) = head.owner.as_ref().filter(|owner| owner.id != node.id) {
             bail!("disk {} is attached on {}", store.disk, owner.node);
         }
         let mut new = head.clone();
-        // An old owner can still upload into its folder after a forced claim.
-        if other.is_some() || store.folder_has_objects(head.next).await? {
+        // A crash before a head write leaves objects in the folder `next`.
+        if store.folder_has_objects(head.next).await? {
             new.lost.push(head.next);
         }
         new.next += 1;

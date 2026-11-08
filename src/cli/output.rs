@@ -51,7 +51,12 @@ pub fn print(request: &Request, result: &Value) {
             }
         }
         Request::Detach { disk } => println!("Detached disk {disk}. The bucket has all its data"),
-        Request::Create { disk, .. } => println!("Made disk {disk}: {}", size(&result["size"])),
+        Request::Create { disk, .. } => {
+            println!("Made disk {disk}: {}", size(&result["size"]));
+            if let Some(warning) = result["warning"].as_str() {
+                println!("Warning: {warning}");
+            }
+        }
         Request::Restore { target, .. } => println!("Made disk {target} from the snapshot: {} objects copied", result["copied_objects"]),
         Request::SnapshotCreate { disk, snapshot, .. } => println!("Took snapshot {snapshot} of disk {disk} at transaction {}", result["transaction"]),
         Request::SnapshotDelete { snapshot, .. } => println!("Deleted snapshot {snapshot}"),

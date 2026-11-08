@@ -102,17 +102,18 @@ The head holds:
 To **claim** a disk, a node reads the head and writes it back with
 `If-Match`, with itself as the owner and `next` plus one. If another node
 wrote the head between the read and the write, the write fails, and the
-claim fails. A claim refuses a disk that another node owns. `--force` takes
-the disk anyway: use it only when the other node is off.
+claim fails. A claim refuses a disk that another node owns.
 
 The owner writes the head at the end of each transaction, again with
-`If-Match`. When the write fails, another node took the disk. The old owner
+`If-Match`. When the write fails, somebody else changed the head. The owner
 then stops the disk: it refuses all I/O and keeps its local data.
 
-A forced claim cannot know if the old owner is still uploading. So the new
-owner adds the old `next` to `lost`. The old owner can only write into that
-folder, because it cannot change the head. The new owner deletes the
-objects in the lost folders.
+Each head write first reads the head and compares its version. With
+conditional writes, this read only finds a conflict early. Some stores,
+such as Garage, ignore the conditions. There the read is the only check,
+and it leaves a gap of a few milliseconds between the read and the write.
+So on such a store, attach a disk on one node only: `mica disk create`
+warns about it.
 
 ## A write
 
@@ -275,7 +276,7 @@ bucket, or one that was deleted and made again. It keeps such data as
 | The node reboots | The devices and `/run` are gone. The local data and the credentials stay. At start, the daemon claims each disk again and makes a new device. It retries while the bucket cannot be reached. The local data becomes orphaned only when the head names another owner, or the disk is gone. |
 | Power loss | Same as a reboot. Writes after the last flush can be lost, as on any disk with a write cache. The dirty log makes sure that no torn data comes back. |
 | The bucket is down | Reads of local and cached data work. Writes go on until the unsaved data reaches its limit, then wait. Transactions retry. |
-| Another node takes the disk | The old owner fails its next head write, stops the disk, and keeps its local data as orphaned. |
+| Somebody else changes the head | The owner fails its next head write, stops the disk, and keeps its local data as orphaned. |
 | A local sync fails | The disk stops for good. Linux reports a write error only once, so a later sync that works proves nothing. |
 | A second daemon starts on the same folders | It refuses to start. Each daemon locks its data folder and its run folder. A stopping daemon can still run its last transactions, and two daemons on one folder would punch out the chunks of each other. |
 
