@@ -14,20 +14,24 @@
 //!
 //! The files: `io.rs` (read, write, flush), `fast.rs` (the requests that a
 //! queue thread serves alone), `clean.rs` (cache and downloads), `saved.rs`
-//! (saved chunks), `transaction.rs` and `upload.rs`, and `prefetch.rs`.
+//! (saved chunks), `transaction.rs` and `upload.rs`, `prefetch.rs`, `room.rs`
+//! (the unsaved limit) and `status.rs`.
 
 mod clean;
 mod fast;
 mod io;
 pub mod prefetch;
+mod room;
 mod saved;
 mod slots;
+mod status;
 mod transaction;
 mod upload;
 #[cfg(test)]
 mod tests;
 
 pub use fast::{LocalRead, LocalWrite, ReadSource};
+use status::IoStats;
 pub use transaction::Kind as TransactionKind;
 
 use crate::local::{ChunkCache, DataFiles, DirtyLog, DiskFolder};
@@ -36,13 +40,12 @@ use crate::store::{DiskStore, Limits, Root};
 use crate::transfers::Transfers;
 use anyhow::{Result, anyhow, bail};
 use prefetch::{ReadAhead, ReadProfile};
-use serde::Serialize;
 use slots::{ChunkMap, Slot};
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::sync::Notify;
 
 pub struct Disk {
@@ -96,43 +99,6 @@ pub struct Disk {
     stopped: Mutex<Option<String>>,
     closed: AtomicBool,
     pub(crate) stats: IoStats,
-}
-
-#[derive(Debug, Serialize)]
-pub struct Status {
-    pub size: u64,
-    pub chunk_size: u64,
-    pub transaction: u64,
-    /// When the last transaction ended, in Unix seconds. 0 for none.
-    pub saved_time: u64,
-    pub unsaved_bytes: u64,
-    /// The part of `unsaved_bytes` that the running transaction has uploaded already.
-    pub staged_bytes: u64,
-    pub local_bytes: u64,
-    pub cache_bytes: u64,
-    pub limits: Limits,
-    pub behind: bool,
-    pub stopped: Option<String>,
-    /// Requests and bytes to the bucket since the attach: they set the bill.
-    pub requests: serde_json::Value,
-    pub io: serde_json::Value,
-}
-
-/// Where the time of writes and flushes goes, for `mica status --json`.
-#[derive(Debug, Default, Serialize)]
-pub struct IoStats {
-    /// Chunks made local for a write that covers only part of the chunk.
-    pub chunk_copies: AtomicU64,
-    pub chunk_copy_micros: AtomicU64,
-    pub flushes: AtomicU64,
-    pub data_sync_micros: AtomicU64,
-    pub log_append_micros: AtomicU64,
-}
-
-impl IoStats {
-    pub fn add(counter: &AtomicU64, started: std::time::Instant) {
-        counter.fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
-    }
 }
 
 /// The part of a request that falls into one chunk.
@@ -224,39 +190,9 @@ impl Disk {
         self.version.load(Ordering::SeqCst) == 0 && self.unsaved.lock().unwrap().is_empty()
     }
 
-    pub fn status(&self) -> Status {
-        // Each lock alone: a guard in the struct expression would live to its end.
-        let saved_time = self.root.lock().unwrap().time;
-        let unsaved_bytes = self.unsaved.lock().unwrap().len() as u64 * self.chunk_size;
-        let local_bytes = self.local.lock().unwrap().len() as u64 * self.chunk_size;
-        let limits = *self.limits.lock().unwrap();
-        let stopped = self.stopped.lock().unwrap().clone();
-        Status {
-            size: self.size,
-            chunk_size: self.chunk_size,
-            transaction: self.version.load(Ordering::SeqCst),
-            saved_time,
-            unsaved_bytes,
-            staged_bytes: self.staged_bytes.load(Ordering::Relaxed).min(unsaved_bytes),
-            local_bytes,
-            cache_bytes: self.cache.usage().bytes,
-            limits,
-            behind: self.is_behind(),
-            stopped,
-            requests: serde_json::to_value(&self.store.bucket.counts).unwrap_or_default(),
-            io: serde_json::to_value(&self.stats).unwrap_or_default(),
-        }
-    }
-
     /// The claim, for a change of the head. It waits for a running transaction.
     pub async fn claim(&self) -> tokio::sync::MutexGuard<'_, Claim> {
         self.claim.lock().await
-    }
-
-    pub fn set_limits(&self, limits: Limits) {
-        *self.limits.lock().unwrap() = limits;
-        self.cache.set_limit(limits.cache_bytes);
-        self.room.notify_waiters();
     }
 
     /// Stops the background work of the disk. The device is gone already.
@@ -287,19 +223,6 @@ impl Disk {
             Some(reason) => bail!("disk {} is stopped: {reason}", self.name),
             None => Ok(()),
         }
-    }
-
-    /// Behind: the oldest unsaved write missed three transactions.
-    pub fn is_behind(&self) -> bool {
-        self.oldest_unsaved.lock().unwrap().is_some_and(|since| since.elapsed() > 3 * self.interval())
-    }
-
-    pub fn interval(&self) -> Duration {
-        Duration::from_secs(self.limits.lock().unwrap().interval_seconds.max(1))
-    }
-
-    pub fn has_unsaved(&self) -> bool {
-        !self.unsaved.lock().unwrap().is_empty()
     }
 
     /// The slot of a chunk. Loads its page from the current version.
@@ -333,35 +256,5 @@ impl Disk {
 
     fn missing(&self, index: usize) -> anyhow::Error {
         anyhow!("disk {}: chunk {index} is not loaded", self.name)
-    }
-
-    fn unsaved_limit(&self) -> usize {
-        (self.limits.lock().unwrap().unsaved_bytes / self.chunk_size).max(2) as usize
-    }
-
-    /// Unsaved data is high or old: a background transaction takes all chunks.
-    fn under_pressure(&self) -> bool {
-        self.unsaved.lock().unwrap().len() >= self.unsaved_limit() / 2 || self.is_behind()
-    }
-
-    /// A write into an unsaved chunk adds no unsaved data, so it always has room.
-    fn has_room_for(&self, index: usize) -> bool {
-        let limit = self.unsaved_limit();
-        let unsaved = self.unsaved.lock().unwrap();
-        unsaved.len() < limit || unsaved.contains(&index)
-    }
-
-    /// Writes wait at the unsaved limit until a transaction makes room. The
-    /// guest sees a slow disk, not an error.
-    async fn wait_for_room(&self, index: usize) -> Result<()> {
-        loop {
-            let room = self.room.notified();
-            self.ensure_usable()?;
-            if self.has_room_for(index) {
-                return Ok(());
-            }
-            self.transaction_wanted.notify_one();
-            room.await;
-        }
     }
 }
