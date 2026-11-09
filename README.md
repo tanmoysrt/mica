@@ -60,7 +60,7 @@ You give the bucket and its keys once. After that, each command needs only the n
 | Database writes with many flushes | 40 to 50 % of a local file |
 | A quiet 50 GB disk on Cloudflare R2 | About $0.60 a month |
 | A database that writes all day, on R2 | $1 to $13 a month when its data fits in memory, about $25 when it does not |
-| Power cuts and crashes of the daemon | No flushed write lost in 10 of 10 tests |
+| Power cuts and crashes of the daemon | No flushed write lost in 12 of 12 tests |
 
 [Speed and cost](docs/benchmarks.md) has the setup, all the numbers and the prices of each provider.
 

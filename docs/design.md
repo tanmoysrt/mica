@@ -89,6 +89,8 @@ Each head write first reads the head and compares its version. With conditional 
 
 The data file is one sparse file for the whole disk. A chunk that is not local is a hole in it. So the file uses space only for local chunks.
 
+On btrfs, the data file and the cache files are NOCOW, as for VM images: a copy-on-write file gets new extents and checksums at each sync, which made random writes half as fast. Both kinds of file are NOCOW, because btrfs moves a chunk between them with a reflink only when they are alike. btrfs then keeps no checksums of these files. A cache file has its hash, but btrfs cannot find a bad sector in data that is not in the bucket yet. The flag has no effect on other filesystems.
+
 ### Flush
 
 A guest flush asks for durable data. mica syncs the data file, then appends the chunks that became local since the last flush to the **dirty log**. The dirty log is the list of local chunks. Two files, `log-a` and `log-b`, hold it: a rewrite goes to the file not in use, so one file is always complete.

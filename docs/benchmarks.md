@@ -7,7 +7,8 @@ This page shows how fast a mica disk is, what it costs each month, and how the c
 - **Reads** of a database are as fast as on a local file, also from a cold cache with 20 ms to the bucket.
 - **Writes** of a database that flushes often run at 40 to 50 % of a local file. The flushes take the time.
 - **A quiet 50 GB disk** costs about $0.60 a month on Cloudflare R2. **A database that writes all day** costs about $1 to $13 a month when its data fits in its memory, and about $25 with 4 MiB chunks when it does not.
-- **Crashes:** in 6 power cuts and 4 kills of the daemon, no flushed write was lost.
+- **Raw I/O** on a warm disk: about 190k random 4 KiB writes and 940k random 4 KiB reads per second, and 1,400 to 1,700 synced 16 KiB writes per second.
+- **Crashes:** in 6 power cuts and 6 kills of the daemon, no flushed write was lost.
 
 ## The setup
 
@@ -59,7 +60,23 @@ A mica flush costs more than a flush of a plain file, for three reasons:
 
 One change helped: saved chunks now stay on the machine, up to the cache limit. On ext4, this made read-write steady at 213–224 tps. Before it, three runs gave 217, 157 and 164 tps, with ten times more chunk copies. With 64 KiB chunks, read-write fell to 120–185 tps.
 
-These runs were on a laptop filesystem that was 94 % full. A run on a server with ext4 or XFS on NVMe is still to do.
+These runs were on a laptop filesystem that was 94 % full, before the data file became NOCOW on btrfs (see below). A run on a server with ext4 or XFS on NVMe is still to do.
+
+## Raw speed with fio
+
+fio with `io_uring` and direct I/O on a warm 8 GiB disk, on btrfs. The jobs read and write the first 1 GiB, which fits in the page cache. The numbers are the median of three to five runs.
+
+| Job | Copy-on-write data file | NOCOW data file (now) |
+|---|---|---|
+| Random 4 KiB reads, 2 jobs, depth 32 | 871k IOPS | 943k IOPS |
+| Random 4 KiB reads, 4 jobs, depth 32 | 1.47M IOPS | 1.68M IOPS |
+| Random 4 KiB reads, depth 1 | 96k IOPS, 8 µs | 95k IOPS, 8 µs |
+| Random 4 KiB writes, 2 jobs, depth 32 | 100k IOPS, p99 2.0 ms | 188k IOPS, p99 1.0 ms |
+| Synced 16 KiB writes, depth 1 | 830–1,230 per second | 1,430–1,700 per second |
+
+On btrfs, mica makes the data file and the cache files NOCOW, as for VM images. A copy-on-write file gets new extents and new checksums at each sync. In a synced write, the sync of the data file took 710 µs with copy-on-write and 500 µs with NOCOW. mica itself adds about 55 µs to each flush, and the write about 35 µs.
+
+Two other changes were measured and not kept. More ublk queues were slower: 8 queues gave 743k random reads at 2 jobs against 918k for 4, and 16 queues were slower still. The data file as a registered io_uring file was within 4 % of a plain file descriptor in each job.
 
 ## Crash tests
 
@@ -70,7 +87,7 @@ These runs were on a laptop filesystem that was 94 % full. A run on a server wit
 | Test | Result |
 |---|---|
 | Power cuts | 6 of 6: no flushed write lost |
-| Daemon kills in the same rig | 4 of 4: no flushed write lost |
+| Daemon kills in the same rig | 6 of 6: no flushed write lost |
 
 These tests found two bugs, both fixed: small files of the daemon written without a sync, and two daemons on one data folder. [How mica works](design.md#crashes-and-restarts) explains the crash rules.
 

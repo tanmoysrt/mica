@@ -6,6 +6,7 @@
 //!
 //! One sparse file holds the whole disk, so a flush syncs one file. On
 //! ext4 a file has at most 16 TiB, so a disk on ext4 has at most 16 TiB.
+//! A new data file is NOCOW on btrfs: see `no_copy_on_write`.
 
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeSet;
@@ -30,6 +31,9 @@ impl DataFiles {
         let path = dir.join("data");
         let found = path.exists();
         let file = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path)?;
+        if !found {
+            super::no_copy_on_write(&file);
+        }
         if file.metadata()?.len() < disk_size {
             file.set_len(disk_size)?;
         }
@@ -139,6 +143,7 @@ fn punch(file: &File, offset: u64, len: u64) -> Result<bool> {
         false => Err(error).context("fallocate"),
     }
 }
+
 
 #[cfg(test)]
 mod tests {

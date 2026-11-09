@@ -45,15 +45,15 @@ Lab checks: create and run; two containers on one volume; `docker volume rm`; a 
 
 Zero copy is done (`plans/ublk-zero-copy.md`, results in `lab/results/2026-10-30-zerocopy*`).
 
-- [ ] Benchmark fixed-file registration for stable backing files. [Loop example](https://github.com/ublk-org/libublk-rs/blob/main/examples/loop.rs)
-- [ ] Measure per-queue CPU use with single and multiple submitters. Try extra threads per queue only for saturated workloads, and check shallow-I/O latency. [Benchmark caveats](https://github.com/ublk-org/libublk-rs#benchmarking-caveat-one-submitter-measures-one-queue)
+- [x] Fixed-file registration of the data file: within 4 % of a plain fd in each job (2026-11-09), not kept.
+- [x] Queue count: 4 queues beat 8 and 16 on a 16-CPU laptop (2026-11-09), so `MAX_QUEUES` stays 4. With 2 submitters on CPUs of one queue, one queue thread is the limit. Benchmarks must read a range that fits in the page cache, or the reads go to the SSD and the numbers jump. [Benchmark caveats](https://github.com/ublk-org/libublk-rs#benchmarking-caveat-one-submitter-measures-one-queue)
 - [ ] FUA writes into local chunks still copy the request through `/dev/ublkcN`. Serve them on the queue thread only if a profile shows the copy.
 - [ ] Idle write plus `fdatasync` with the no-iowait wait: 833/s against 1045/s for zero copy in the lab (wide spread), the same on the VM. Watch this number.
 - When libublk changes, compare the event loop in `src/ublk/queue.rs` with `libublk::wait_and_handle_io_events`.
 
 ## Other open items
 
-- On btrfs, a synced 4 KiB write costs about 50 µs more in a 1 GiB data file than in a new small file. Smaller data files do not help. Check XFS and ext4.
+- On btrfs, the data and cache files are NOCOW now (2026-11-09): random writes 100k to 188k IOPS, synced writes up to 1,700/s. A flush still spends about 55 µs outside the sync (queue thread, tokio, a blocking thread); a flush on the queue thread could save it, not tried. Check XFS and ext4 on a server.
 - A store without conditional writes (Garage): mica reads the head before each head write, but two machines that read at the same moment can both win. Only users, or an orchestrator, keep such a disk on one machine.
 - Linux 7.0 logs a UBSAN array-index warning in `io_buffer_register_bvec` (io_uring/rsrc.c) once per boot, when the first mica device starts (ublk auto buffer registration). Seen on Fedora 7.0.12 and Ubuntu 7.0.0. The data checks pass. Follow the upstream io_uring fix.
 - Not tested: Hetzner and Wasabi (no account). Their documents do not say if PutObject keeps `If-Match` and `If-None-Match`: `mica bucket add` probes it.

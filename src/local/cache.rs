@@ -240,6 +240,7 @@ impl ChunkCache {
         let temp = temp_path(&target);
         std::fs::create_dir_all(target.parent().unwrap())?;
         let file = File::create(&temp)?;
+        super::no_copy_on_write(&file);
         if let Err(error) = write(&file) {
             let _ = std::fs::remove_file(&temp);
             return Err(error);
