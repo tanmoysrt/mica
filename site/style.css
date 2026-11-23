@@ -28,7 +28,7 @@ nav{display:flex;align-items:center;justify-content:space-between;height:72px}
 
 /* hero */
 .hero{position:relative;text-align:center;padding:88px 0 40px;isolation:isolate}
-.hero::before{content:"";position:absolute;z-index:-1;left:50%;top:-120px;width:min(1000px,100vw);height:520px;translate:-50% 0;background:radial-gradient(closest-side,var(--accent-soft),transparent);animation:breathe 9s ease-in-out infinite}
+.hero::before{content:"";position:absolute;z-index:-1;left:50%;top:-120px;width:min(1000px,100vw);height:520px;translate:-50% 0;pointer-events:none;background:radial-gradient(closest-side,var(--accent-soft),transparent);animation:breathe 9s ease-in-out infinite}
 @keyframes breathe{50%{opacity:.55;transform:scale(1.06)}}
 h1{font-size:clamp(42px,6.4vw,78px)}
 h1 em{font-style:normal;color:var(--accent)}
