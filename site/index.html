@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mica · A Linux disk that lives in an S3 bucket</title>
+<meta name="description" content="mica gives Linux a normal block device whose data lives in an S3 bucket. It can be larger than your SSD, and it moves to any machine. Free and open source.">
+<meta property="og:title" content="mica · A Linux disk that lives in an S3 bucket">
+<meta property="og:description" content="A normal block device whose data lives in object storage. Free and open source.">
+<meta property="og:image" content="https://mica.tanmoysarkar.me/mica-logo.png">
+<meta property="og:url" content="https://mica.tanmoysarkar.me/">
+<link rel="canonical" href="https://mica.tanmoysarkar.me/">
+<meta name="theme-color" content="#fbfcfe" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#05080f" media="(prefers-color-scheme: dark)">
+<link rel="icon" type="image/png" href="mica-logo.png">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@600;700&family=Inter:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<script>
+// follow the system theme
+{ const m = matchMedia('(prefers-color-scheme: dark)'), t = () => document.documentElement.classList.toggle('dark', m.matches); t(); m.addEventListener('change', t) }
+</script>
+</head>
+<body>
+<div class="wrap">
+  <nav class="in">
+    <a class="logo" href="#"><svg viewBox="0 0 64 64" aria-hidden="true"><path class="cl" d="M19 44h-3a11 11 0 0 1-1.5-21.9A16 16 0 0 1 44 17a12 12 0 0 1 6 22.6" fill="none" stroke-width="5" stroke-linecap="round"/><path class="fl" d="M32 30 47 38.5 32 47 17 38.5Z"/><path class="ink" d="M17 43 32 51.5 47 43v3.5L32 55 17 46.5Z"/><rect class="fl" x="50" y="42" width="6" height="6" rx="1.5" transform="rotate(45 53 45)"/></svg>mica</a>
+    <div class="nl">
+      <a class="hide" href="#how">How it works</a>
+      <a class="hide" href="https://github.com/tanmoysrt/mica/tree/develop/docs">Docs</a>
+      <a href="https://github.com/tanmoysrt/mica" aria-label="GitHub"><svg data-gh></svg><span class="hide">GitHub</span></a>
+    </div>
+  </nav>
+</div>
+
+<header class="hero">
+  <div class="wrap">
+    <h1 class="in d1">A Linux disk that lives in an <em>S3&nbsp;bucket</em>.</h1>
+    <p class="lede in d2">A normal block device whose data lives in object storage. It can be larger than your SSD.</p>
+    <div class="ctas in d3">
+      <a class="btn primary" href="#install">Get started</a>
+      <a class="btn ghost" href="https://github.com/tanmoysrt/mica"><svg data-gh></svg>View the source</a>
+    </div>
+    <div class="stack in d4" aria-label="Writes go to /dev/mica/data, land on the local SSD, and the changed chunks upload to your bucket">
+      <div class="hn"><b>/dev/mica/data</b><div class="io"><span>ext4</span><span>VM</span><span>database</span></div><em id="st0">writing</em></div>
+      <div class="link" id="l1"></div>
+      <div class="hn"><b>local SSD</b><div class="cg" id="g1"></div><em id="st1" class="num">0 unsaved</em></div>
+      <div class="link" id="l2"></div>
+      <div class="hn acc"><b>your bucket</b><div class="cg" id="g2"></div><em id="st2" class="num">head v41</em></div>
+    </div>
+    <p class="cap in d4">Writes land on the SSD first. Every 5 minutes, the changed chunks go up.</p>
+  </div>
+</header>
+
+<main>
+  <section id="see"><div class="wrap">
+    <h2 class="rv">See it work.</h2>
+    <p class="sub rv s1">Put a filesystem on it, give it to a VM, or keep a database on it.</p>
+    <div class="term rv s2"><div class="bar"><i></i><i></i><i></i></div><pre id="term"></pre></div>
+  </div></section>
+
+  <section id="move" style="padding-top:0"><div class="wrap">
+    <h2 class="rv">Detach here. Attach anywhere.</h2>
+    <p class="sub rv s1">The next machine starts at once and downloads only what it reads.</p>
+    <svg class="scene rv s2" viewBox="0 0 1000 330" aria-label="A disk moves from the laptop, through the bucket, to server-2">
+      <path id="trail" class="trail" d="M170 238 C170 120 380 70 500 70 C620 70 830 120 830 238"/>
+      <rect class="bk" x="436" y="40" width="128" height="60" rx="16"/>
+      <text class="t" x="500" y="26" text-anchor="middle">your bucket</text>
+      <text class="s" id="sb" x="500" y="128" text-anchor="middle">head v41</text>
+      <rect class="card" x="40" y="170" width="260" height="150" rx="20"/>
+      <text class="t" x="68" y="208">laptop</text>
+      <text class="s" id="sl" x="68" y="302">attached</text>
+      <rect class="slot" x="138" y="218" width="64" height="40" rx="9"/>
+      <rect class="card" x="700" y="170" width="260" height="150" rx="20"/>
+      <text class="t" x="728" y="208">server-2</text>
+      <text class="s" id="sr" x="728" y="302">idle</text>
+      <rect class="slot" x="798" y="218" width="64" height="40" rx="9"/>
+      <g class="chip" id="chip"><rect x="-32" y="-20" width="64" height="40" rx="9"/><path d="M0 -9 11 -2.5 0 4 -11 -2.5Z"/><path d="M-11 1.5 0 8 11 1.5v2.5L0 10.5-11 4Z" opacity=".55"/></g>
+    </svg>
+  </div></section>
+
+  <section id="how" style="padding-top:0"><div class="wrap">
+    <h2 class="rv">What it can do.</h2>
+    <div class="grid">
+      <div class="tile rv">
+        <div class="vis v-byo">
+          <div class="row"><span class="node">your machine</span><span class="wire"><i></i><i></i><i></i></span><span class="node acc">your bucket</span></div>
+          <div class="chips"><span>Cloudflare R2</span><span>AWS S3</span><span>MinIO</span><span>RustFS</span></div>
+        </div>
+        <h3>Bring your own bucket.</h3><p>mica talks to it directly. No account, no service.</p>
+      </div>
+      <div class="tile rv s1">
+        <div class="vis v-snap"><span class="rail"></span><span class="ver" style="--i:0"><b></b>v38</span><span class="ver" style="--i:1"><b></b>v39</span><span class="ver flag" style="--i:2"><b></b>v40</span><span class="ver" style="--i:3"><b></b>v41</span><span class="ver" style="--i:4"><b></b>v42</span><span class="ver" style="--i:5"><b></b>v43</span></div>
+        <h3>Snapshots for free.</h3><p>A snapshot copies nothing. A restore downloads nothing.</p>
+      </div>
+      <div class="tile rv">
+        <div class="vis v-lock">
+          <svg preserveAspectRatio="none" viewBox="0 0 100 100"><path d="M22 74 C22 40 40 26 50 22"/><path d="M78 74 C78 40 60 26 50 22"/></svg>
+          <span class="bk">head <b class="num">v42</b></span>
+          <span class="m a">machine A<em>✓ saved</em></span><span class="m b">machine B<em>✗ 412</em></span>
+        </div>
+        <h3>One machine at a time.</h3><p>The head is a lock. A second writer gets HTTP 412.</p>
+      </div>
+      <div class="tile rv s1">
+        <div class="vis v-dev">
+          <span class="ln"><i>$</i> mkfs.ext4 <b>/dev/mica/data</b></span>
+          <span class="ln"><i>$</i> mount <b>/dev/mica/data</b> /mnt/data</span>
+        </div>
+        <h3>No FUSE.</h3><p>ublk gives the kernel a block device. Any filesystem works.</p>
+      </div>
+    </div>
+    <div class="nums">
+      <div class="rv"><b class="num">98%</b><span>of local read speed, cold, 20&nbsp;ms from the bucket</span></div>
+      <div class="rv s1"><b class="num">$0.60</b><span>a month for a quiet 50&nbsp;GB disk on R2</span></div>
+      <div class="rv s2"><b class="num">12/12</b><span>power cuts and kills with no flushed write lost</span></div>
+    </div>
+    <p class="note rv">Changes reach the bucket every 5 minutes. <a href="https://github.com/tanmoysrt/mica/blob/develop/docs/design.md">How mica works →</a></p>
+  </div></section>
+
+  <section id="install" style="padding-top:0"><div class="wrap">
+    <h2 class="rv">Yours in three commands.</h2>
+    <div class="box rv s1"><button class="copy" id="copy">Copy</button><pre id="cmds"><i>$ </i>cargo install --git https://github.com/tanmoysrt/mica
+<i>$ </i>sudo cp ~/.cargo/bin/mica /usr/local/bin/
+<i>$ </i>sudo mica service install</pre></div>
+    <p class="req rv s2">Linux 6.16+ with ublk, systemd, and a bucket with conditional writes.</p>
+    <div class="links rv s2"><a href="https://github.com/tanmoysrt/mica/blob/develop/docs/getting-started.md">Read the guide →</a><a href="https://github.com/tanmoysrt/mica">GitHub →</a></div>
+  </div></section>
+</main>
+
+<footer><div class="wrap"><span>Free and open source, MIT.</span><span>Under development. Do not trust it with data you cannot lose yet.</span></div></footer>
+<script src="main.js"></script>
+</body></html>
